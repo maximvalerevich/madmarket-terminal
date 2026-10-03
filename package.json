@@ -1,0 +1,29 @@
+{
+  "name": "madmarket-lowlatency-terminal",
+  "version": "1.0.0",
+  "description": "Ultra low-latency CLI terminal for semi-automated courtsiding and after-goal betting on MadMarket (Mollybet engine)",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test-runner.js",
+    "logs": "node logs.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "trading",
+    "betting",
+    "low-latency",
+    "http2",
+    "mollybet",
+    "madmarket",
+    "courtsiding"
+  ],
+  "author": "",
+  "license": "MIT"
+}

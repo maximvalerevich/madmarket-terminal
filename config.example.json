@@ -1,0 +1,21 @@
+{
+  "global": {
+    "defaultStake": 5.0,
+    "stakeStep": 10.0,
+    "defaultCurrency": "EUR",
+    "slippagePct": 0.03,
+    "defaultDuration": 15,
+    "debounceMs": 2000,
+    "dryRun": false
+  },
+  "adapters": {
+    "mollybet": {
+      "enabled": true,
+      "baseUrl": "https://edge.madmarket.io",
+      "wsUrl": "wss://edge.madmarket.io/cpricefeed/",
+      "sessionToken": "",
+      "instanceId": "",
+      "accounts": [["pin88", "_YOUR_ACCOUNT_ID_"]]
+    }
+  }
+}
