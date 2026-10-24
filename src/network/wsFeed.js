@@ -107,6 +107,12 @@ export class WsFeed extends BaseFeed {
      * @type {Map<string, Map<string, Object>>}
      */
     this.lineSpectrums = new Map();
+
+    /**
+     * Tracks current active hockey period (1, 2, or 3) per eventId.
+     * @type {Map<string, number>}
+     */
+    this.eventHockeyPeriods = new Map();
   }
 
   /**
@@ -249,11 +255,13 @@ export class WsFeed extends BaseFeed {
     this.watchedEvent = { competitionId: compId, sport: s, eventId: id };
 
     if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // Build subscription targets: subscribe to primary sport + ht if football
+      // Build subscription targets: subscribe to primary sport + ht if football, or 'ih' if ice hockey
       const targets = [];
       if (s.startsWith('fb')) {
         targets.push([compId, 'fb', id]);
         targets.push([compId, 'fb_ht', id]);
+      } else if (s === 'ih') {
+        targets.push([compId, 'ih', id]);
       } else {
         targets.push([compId, s, id]);
       }
@@ -281,9 +289,11 @@ export class WsFeed extends BaseFeed {
     const id = String(eventId);
 
     // Evict lineSpectrums and eventActiveLines for this event
-    this.eventActiveLines.delete(`${id}:${s}`);
-    this.eventActiveLines.delete(`${id}:fb`);
-    this.eventActiveLines.delete(`${id}:fb_ht`);
+    for (const key of Array.from(this.eventActiveLines.keys())) {
+      if (key.startsWith(`${id}:`)) {
+        this.eventActiveLines.delete(key);
+      }
+    }
     for (const key of Array.from(this.lineSpectrums.keys())) {
       if (key.startsWith(`${id}:`)) {
         this.lineSpectrums.delete(key);
@@ -297,6 +307,8 @@ export class WsFeed extends BaseFeed {
       if (s.startsWith('fb')) {
         targets.push([compId, 'fb', id]);
         targets.push([compId, 'fb_ht', id]);
+      } else if (s === 'ih') {
+        targets.push([compId, 'ih', id]);
       } else {
         targets.push([compId, s, id]);
       }
@@ -416,6 +428,7 @@ export class WsFeed extends BaseFeed {
 
     const sport = String(targetSpec[0] || 'fb');
     const eventId = String(targetSpec[1]);
+    const isHockey = sport === 'ih';
 
     let homeTeam = metadata.home || metadata.home_team || (metadata.teams && metadata.teams[0]?.name) || '';
     let awayTeam = metadata.away || metadata.away_team || (metadata.teams && metadata.teams[1]?.name) || '';
@@ -432,13 +445,18 @@ export class WsFeed extends BaseFeed {
 
     homeTeam = homeTeam || 'Home';
     awayTeam = awayTeam || 'Away';
-    const competition = metadata.competition_name || metadata.competition || 'Soccer';
+    const competition = metadata.competition_name || metadata.competition || (isHockey ? 'Ice Hockey' : 'Soccer');
     const competitionId = metadata.competition_id || 0;
     const startTs = metadata.start_ts || '';
 
     let score = { home: 0, away: 0 };
+    let htScore = undefined;
     let minute = '';
     let isLive = false;
+    let hockeyPeriod = isHockey ? 1 : undefined;
+    let periodScores = undefined;
+    let periodScoresStr = '';
+    let eventStage = '';
 
     if (metadata.ir_status && typeof metadata.ir_status === 'object') {
       const ir = metadata.ir_status;
@@ -449,14 +467,60 @@ export class WsFeed extends BaseFeed {
         };
         isLive = true;
       }
-      if (Array.isArray(ir.time) && ir.time.length >= 2) {
+
+      if (isHockey) {
+        eventStage = String(ir.event_stage || '');
+        const upperStage = eventStage.toUpperCase();
+        isLive = upperStage !== 'ENDED' && upperStage !== 'FINISHED';
+
+        if (Array.isArray(ir.period_scores) && ir.period_scores.length > 0) {
+          periodScores = ir.period_scores;
+          if (ir.period_scores.length === 1) hockeyPeriod = 1;
+          else if (ir.period_scores.length === 2) hockeyPeriod = 2;
+          else if (ir.period_scores.length >= 3) hockeyPeriod = 3;
+
+          const lastP = ir.period_scores[ir.period_scores.length - 1];
+          if (Array.isArray(lastP) && lastP.length >= 2) {
+            htScore = {
+              home: Number(lastP[0]) || 0,
+              away: Number(lastP[1]) || 0
+            };
+          }
+          periodScoresStr = ir.period_scores
+            .filter(p => Array.isArray(p) && p.length >= 2)
+            .map(p => `${p[0]}:${p[1]}`)
+            .join(', ');
+        } else {
+          const stageOrTime = `${eventStage} ${Array.isArray(ir.time) ? ir.time.join(' ') : (ir.time || '')}`;
+          const m = stageOrTime.match(/\b([123])\s*p\b|\bp\s*([123])\b|\b([123])(?:st|nd|rd)[_\s]*period\b/i);
+          if (m) {
+            hockeyPeriod = Number(m[1] || m[2] || m[3]) || 1;
+          }
+        }
+
+        this.eventHockeyPeriods.set(eventId, hockeyPeriod);
+
+        let timeLabel = '';
+        if (ir.period_time != null) {
+          const pt = Array.isArray(ir.period_time) ? ir.period_time.join(' ') : String(ir.period_time);
+          timeLabel = `P${hockeyPeriod} ${pt}'`;
+        } else if (Array.isArray(ir.time) && ir.time.length >= 2) {
+          timeLabel = `P${hockeyPeriod} ${ir.time[1]}'`;
+        } else if (eventStage) {
+          timeLabel = eventStage;
+        } else {
+          timeLabel = `P${hockeyPeriod}`;
+        }
+
+        minute = periodScoresStr ? `${timeLabel} (${periodScoresStr})` : timeLabel;
+      } else if (Array.isArray(ir.time) && ir.time.length >= 2) {
         const half = ir.time[0] === '1h' ? '1H' : (ir.time[0] === '2h' ? '2H' : ir.time[0]);
         minute = `${half} ${ir.time[1]}'`;
         isLive = true;
       }
     }
 
-    if (!isLive) {
+    if (!isLive && !(isHockey && metadata.ir_status)) {
       if (Array.isArray(metadata.score) && metadata.score.length >= 2) {
         score = { home: Number(metadata.score[0]) || 0, away: Number(metadata.score[1]) || 0 };
         isLive = true;
@@ -483,8 +547,12 @@ export class WsFeed extends BaseFeed {
       homeTeam,
       awayTeam,
       score,
-      ftScore: sport === 'fb' ? score : undefined,
-      htScore: sport === 'fb_ht' ? score : undefined,
+      ftScore: (sport === 'fb' || isHockey) ? score : undefined,
+      htScore: isHockey ? htScore : (sport === 'fb_ht' ? score : undefined),
+      hockeyPeriod,
+      periodScores,
+      periodScoresStr: isHockey ? periodScoresStr : undefined,
+      eventStage: isHockey ? eventStage : undefined,
       minute,
       isLive,
       startTs,
@@ -541,9 +609,10 @@ export class WsFeed extends BaseFeed {
 
     const incomingLines = [];
 
-    if (Array.isArray(rawMarket)) {
-      if (typeof rawMarket[0] === 'number') {
-        const r = parseSingle(rawMarket);
+    const walkArrayMarket = (node) => {
+      if (!Array.isArray(node)) return;
+      if (typeof node[0] === 'number' && Array.isArray(node[1])) {
+        const r = parseSingle(node);
         if (r) {
           incomingLines.push({
             rawTotalLineIndex: r.lineIdx,
@@ -552,18 +621,17 @@ export class WsFeed extends BaseFeed {
             totalUnder: r.under
           });
         }
-      } else if (Array.isArray(rawMarket[0])) {
-        for (const entry of rawMarket) {
-          const r = parseSingle(entry);
-          if (!r) continue;
-          incomingLines.push({
-            rawTotalLineIndex: r.lineIdx,
-            totalLine: this.formatTotalLine(r.lineIdx),
-            totalOver: r.over,
-            totalUnder: r.under
-          });
+        return;
+      }
+      for (const child of node) {
+        if (Array.isArray(child)) {
+          walkArrayMarket(child);
         }
       }
+    };
+
+    if (Array.isArray(rawMarket)) {
+      walkArrayMarket(rawMarket);
     } else if (typeof rawMarket === 'object' && rawMarket !== null) {
       const lines = Object.keys(rawMarket);
       if (lines.length > 0) {
@@ -656,6 +724,93 @@ export class WsFeed extends BaseFeed {
   }
 
   /**
+   * Builds a single parsedOdds structure from resolved market entries.
+   * @private
+   */
+  _buildParsedOdds(eventId, scopeKey, defaultTotalLine, defaultItbLine, marketSlice, rawMarkets) {
+    const parsedOdds = {
+      winHome: 0,
+      winDraw: 0,
+      winAway: 0,
+      totalOver: 0,
+      totalUnder: 0,
+      totalLine: null,
+      rawTotalLineIndex: null,
+      itb1Over: 0,
+      itb1Under: 0,
+      itb1Line: null,
+      rawItb1LineIndex: null,
+      itb2Over: 0,
+      itb2Under: 0,
+      itb2Line: null,
+      rawItb2LineIndex: null,
+      totalLines: [],
+      itb1Lines: [],
+      itb2Lines: [],
+      rawMarkets
+    };
+
+    if (marketSlice.hasWdw && marketSlice.rawWdw) {
+      const wdwPrices = extractWdwPrices(marketSlice.rawWdw);
+      if (wdwPrices.h > 0) parsedOdds.winHome = wdwPrices.h;
+      if (wdwPrices.d > 0) parsedOdds.winDraw = wdwPrices.d;
+      if (wdwPrices.a > 0) parsedOdds.winAway = wdwPrices.a;
+    }
+
+    const stickyLines = this.eventActiveLines.get(scopeKey) || {};
+
+    if (marketSlice.hasAhou && marketSlice.rawAhou) {
+      const ahouKey = `${scopeKey}:ahou`;
+      const parsedAhou = this.parseTotalMarket(marketSlice.rawAhou, defaultTotalLine, stickyLines.totalLine, ahouKey);
+      parsedOdds.totalLines = parsedAhou.allLines || [];
+      if (parsedAhou.totalOver > 0 || parsedAhou.totalUnder > 0 || parsedAhou.totalLine) {
+        parsedOdds.totalOver = parsedAhou.totalOver;
+        parsedOdds.totalUnder = parsedAhou.totalUnder;
+        parsedOdds.totalLine = parsedAhou.totalLine;
+        parsedOdds.rawTotalLineIndex = parsedAhou.rawTotalLineIndex;
+        stickyLines.totalLine = parsedAhou.totalLine;
+      }
+    }
+
+    if (marketSlice.hasTahouH && marketSlice.rawTahouH) {
+      const itb1Key = `${scopeKey}:itb1`;
+      const parsedTahouH = this.parseTotalMarket(marketSlice.rawTahouH, defaultItbLine, stickyLines.itb1Line, itb1Key, 'lowest');
+      parsedOdds.itb1Lines = parsedTahouH.allLines || [];
+      if (parsedTahouH.totalOver > 0 || parsedTahouH.totalUnder > 0 || parsedTahouH.totalLine) {
+        parsedOdds.itb1Over = parsedTahouH.totalOver;
+        parsedOdds.itb1Under = parsedTahouH.totalUnder;
+        parsedOdds.itb1Line = parsedTahouH.totalLine;
+        parsedOdds.rawItb1LineIndex = parsedTahouH.rawTotalLineIndex;
+        stickyLines.itb1Line = parsedTahouH.totalLine;
+      }
+    }
+
+    if (marketSlice.hasTahouA && marketSlice.rawTahouA) {
+      const itb2Key = `${scopeKey}:itb2`;
+      const parsedTahouA = this.parseTotalMarket(marketSlice.rawTahouA, defaultItbLine, stickyLines.itb2Line, itb2Key, 'lowest');
+      parsedOdds.itb2Lines = parsedTahouA.allLines || [];
+      if (parsedTahouA.totalOver > 0 || parsedTahouA.totalUnder > 0 || parsedTahouA.totalLine) {
+        parsedOdds.itb2Over = parsedTahouA.totalOver;
+        parsedOdds.itb2Under = parsedTahouA.totalUnder;
+        parsedOdds.itb2Line = parsedTahouA.totalLine;
+        parsedOdds.rawItb2LineIndex = parsedTahouA.rawTotalLineIndex;
+        stickyLines.itb2Line = parsedTahouA.totalLine;
+      }
+    }
+
+    this.eventActiveLines.set(scopeKey, stickyLines);
+
+    parsedOdds.updatedMarkets = {
+      wdw: Boolean(marketSlice.hasWdw),
+      ahou: Boolean(marketSlice.hasAhou),
+      itb1: Boolean(marketSlice.hasTahouH),
+      itb2: Boolean(marketSlice.hasTahouA)
+    };
+
+    return parsedOdds;
+  }
+
+  /**
    * Parses live offers / prices updates.
    * Frame format: ["offers_hcap" | "offers_event", [compId, sport, eventId], markets]
    * @param {Array} frame
@@ -683,106 +838,155 @@ export class WsFeed extends BaseFeed {
 
     if (!eventId) return;
 
-    const parsedOdds = {
-      winHome: 0,
-      winDraw: 0,
-      winAway: 0,
-      totalOver: 0,
-      totalUnder: 0,
-      totalLine: null,
-      rawTotalLineIndex: null,
-      itb1Over: 0,
-      itb1Under: 0,
-      itb1Line: null,
-      rawItb1LineIndex: null,
-      itb2Over: 0,
-      itb2Under: 0,
-      itb2Line: null,
-      rawItb2LineIndex: null,
-      totalLines: [],
-      itb1Lines: [],
-      itb2Lines: [],
-      rawMarkets: markets
-    };
+    // Special smart market resolution for Ice Hockey ('ih')
+    if (sport === 'ih') {
+      const allKeys = Object.keys(markets);
+      const isPeriodKey = (k) => k.includes('tperiod,') || /tp,p[123]\b/.test(k);
+
+      // 1. Resolve Regular Time (FT: tp,reg or short keys, with fallback to tp,all,ml for menu display)
+      const ftWdwKey = ['wdw', 'tp,reg,wdw', 'time_win,tp,reg,wdw'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && (k === 'wdw' || k.endsWith(',wdw')))
+        || ['time_win,tp,all,ml', 'tp,all,ml', 'ml'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && k.endsWith(',ml'));
+
+      const ftAhouKey = ['ahou', 'tp,reg,ahou', 'total,tp,reg,ahou'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && !k.includes('tahou') && (k === 'ahou' || k.endsWith(',ahou')));
+
+      const ftTahouHKey = ['tahou,h', 'tahou_h', 'tp,reg,tahou,h', 'tp,reg,tahou_h'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && (k.endsWith('tahou,h') || k.endsWith('tahou_h')));
+
+      const ftTahouAKey = ['tahou,a', 'tahou_a', 'tp,reg,tahou,a', 'tp,reg,tahou_a'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && (k.endsWith('tahou,a') || k.endsWith('tahou_a')));
+
+      const hasAnyFt = Boolean(ftWdwKey || ftAhouKey || ftTahouHKey || ftTahouAKey);
+
+      // 2. Resolve Active Hockey Period (HT: tperiod,N or tp,pN)
+      const knownPeriod = this.eventHockeyPeriods.get(eventId);
+      const periodNumbersInFrame = new Set();
+      for (const k of allKeys) {
+        const m = k.match(/(?:tperiod,|tp,p)([123])(?:,|$)/);
+        if (m) periodNumbersInFrame.add(Number(m[1]));
+      }
+
+      let activePeriod = knownPeriod || 1;
+      if (periodNumbersInFrame.size > 0 && !periodNumbersInFrame.has(activePeriod)) {
+        activePeriod = Array.from(periodNumbersInFrame)[0];
+      }
+
+      const matchPeriodN = (k, p) => k.includes(`tperiod,${p}`) || k.includes(`tp,p${p}`);
+      const htWdwKey = [`tperiod,${activePeriod},wdw`, `tp,p${activePeriod},wdw`, `time_win,tperiod,${activePeriod},wdw`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && k.endsWith('wdw'));
+
+      const htAhouKey = [`tperiod,${activePeriod},ahou`, `tp,p${activePeriod},ahou`, `total,tperiod,${activePeriod},ahou`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && !k.includes('tahou') && k.endsWith('ahou'));
+
+      const htTahouHKey = [`tperiod,${activePeriod},tahou,h`, `tperiod,${activePeriod},tahou_h`, `tp,p${activePeriod},tahou,h`, `tp,p${activePeriod},tahou_h`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && (k.endsWith('tahou,h') || k.endsWith('tahou_h')));
+
+      const htTahouAKey = [`tperiod,${activePeriod},tahou,a`, `tperiod,${activePeriod},tahou_a`, `tp,p${activePeriod},tahou,a`, `tp,p${activePeriod},tahou_a`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && (k.endsWith('tahou,a') || k.endsWith('tahou_a')));
+
+      const hasAnyHt = Boolean(htWdwKey || htAhouKey || htTahouHKey || htTahouAKey);
+
+      if (hasAnyFt || !hasAnyHt) {
+        const ftParsed = this._buildParsedOdds(
+          eventId,
+          `${eventId}:ih`,
+          '5.5',
+          '2.5',
+          {
+            hasWdw: Boolean(ftWdwKey),
+            rawWdw: ftWdwKey ? markets[ftWdwKey] : null,
+            hasAhou: Boolean(ftAhouKey),
+            rawAhou: ftAhouKey ? markets[ftAhouKey] : null,
+            hasTahouH: Boolean(ftTahouHKey),
+            rawTahouH: ftTahouHKey ? markets[ftTahouHKey] : null,
+            hasTahouA: Boolean(ftTahouAKey),
+            rawTahouA: ftTahouAKey ? markets[ftTahouAKey] : null
+          },
+          markets
+        );
+
+        logger.debug('WsFeed', `[IH FT] Odds tick for ${eventId}: O(${ftParsed.totalLine || '5.5'})=${ftParsed.totalOver}, 1=${ftParsed.winHome}, 2=${ftParsed.winAway}, ITB1(${ftParsed.itb1Line || '2.5'})=${ftParsed.itb1Over}, ITB2(${ftParsed.itb2Line || '2.5'})=${ftParsed.itb2Over}`);
+
+        this.emit('odds_update', {
+          eventId,
+          sport: 'ih',
+          periodType: 'FT',
+          competitionId,
+          odds: ftParsed,
+          updatedMarkets: ftParsed.updatedMarkets
+        });
+      }
+
+      if (hasAnyHt) {
+        const htParsed = this._buildParsedOdds(
+          eventId,
+          `${eventId}:ih_p${activePeriod}`,
+          '1.5',
+          '0.5',
+          {
+            hasWdw: Boolean(htWdwKey),
+            rawWdw: htWdwKey ? markets[htWdwKey] : null,
+            hasAhou: Boolean(htAhouKey),
+            rawAhou: htAhouKey ? markets[htAhouKey] : null,
+            hasTahouH: Boolean(htTahouHKey),
+            rawTahouH: htTahouHKey ? markets[htTahouHKey] : null,
+            hasTahouA: Boolean(htTahouAKey),
+            rawTahouA: htTahouAKey ? markets[htTahouAKey] : null
+          },
+          markets
+        );
+
+        logger.debug('WsFeed', `[IH P${activePeriod}] Odds tick for ${eventId}: O(${htParsed.totalLine || '1.5'})=${htParsed.totalOver}, 1=${htParsed.winHome}, 2=${htParsed.winAway}, ITB1(${htParsed.itb1Line || '0.5'})=${htParsed.itb1Over}, ITB2(${htParsed.itb2Line || '0.5'})=${htParsed.itb2Over}`);
+
+        this.emit('odds_update', {
+          eventId,
+          sport: 'ih',
+          periodType: 'HT',
+          hockeyPeriod: activePeriod,
+          competitionId,
+          odds: htParsed,
+          updatedMarkets: htParsed.updatedMarkets
+        });
+      }
+
+      return;
+    }
 
     const isHtSport = sport === 'fb_ht';
     const defaultTotalLine = isHtSport ? '0.5' : '2.5';
     const defaultItbLine = isHtSport ? '0.5' : '1.5';
-
-    // 1. Extract 1X2 (wdw) using universal recursive walker
-    if (markets.wdw) {
-      const wdwPrices = extractWdwPrices(markets.wdw);
-      if (wdwPrices.h > 0) parsedOdds.winHome = wdwPrices.h;
-      if (wdwPrices.d > 0) parsedOdds.winDraw = wdwPrices.d;
-      if (wdwPrices.a > 0) parsedOdds.winAway = wdwPrices.a;
-    }
-
-    const eventSportKey = `${eventId}:${sport}`;
-    const stickyLines = this.eventActiveLines.get(eventSportKey) || {};
-
-    // 2. Extract Over/Under Total Match (ahou)
-    if (markets.ahou) {
-      const ahouKey = `${eventId}:${sport}:ahou`;
-      const parsedAhou = this.parseTotalMarket(markets.ahou, defaultTotalLine, stickyLines.totalLine, ahouKey);
-      parsedOdds.totalLines = parsedAhou.allLines || [];
-      if (parsedAhou.totalOver > 0 || parsedAhou.totalUnder > 0 || parsedAhou.totalLine) {
-        parsedOdds.totalOver = parsedAhou.totalOver;
-        parsedOdds.totalUnder = parsedAhou.totalUnder;
-        parsedOdds.totalLine = parsedAhou.totalLine;
-        parsedOdds.rawTotalLineIndex = parsedAhou.rawTotalLineIndex;
-        stickyLines.totalLine = parsedAhou.totalLine;
-      }
-    }
-
-    // 3. Extract Team 1 (Home) Individual Over/Under (tahou,h or tahou_h)
-    const rawTahouH = markets['tahou,h'] || markets.tahou_h;
-    if (rawTahouH) {
-      const itb1Key = `${eventId}:${sport}:itb1`;
-      const parsedTahouH = this.parseTotalMarket(rawTahouH, defaultItbLine, stickyLines.itb1Line, itb1Key, 'lowest');
-      parsedOdds.itb1Lines = parsedTahouH.allLines || [];
-      if (parsedTahouH.totalOver > 0 || parsedTahouH.totalUnder > 0 || parsedTahouH.totalLine) {
-        parsedOdds.itb1Over = parsedTahouH.totalOver;
-        parsedOdds.itb1Under = parsedTahouH.totalUnder;
-        parsedOdds.itb1Line = parsedTahouH.totalLine;
-        parsedOdds.rawItb1LineIndex = parsedTahouH.rawTotalLineIndex;
-        stickyLines.itb1Line = parsedTahouH.totalLine;
-      }
-    }
-
-    // 4. Extract Team 2 (Away) Individual Over/Under (tahou,a or tahou_a)
-    const rawTahouA = markets['tahou,a'] || markets.tahou_a;
-    if (rawTahouA) {
-      const itb2Key = `${eventId}:${sport}:itb2`;
-      const parsedTahouA = this.parseTotalMarket(rawTahouA, defaultItbLine, stickyLines.itb2Line, itb2Key, 'lowest');
-      parsedOdds.itb2Lines = parsedTahouA.allLines || [];
-      if (parsedTahouA.totalOver > 0 || parsedTahouA.totalUnder > 0 || parsedTahouA.totalLine) {
-        parsedOdds.itb2Over = parsedTahouA.totalOver;
-        parsedOdds.itb2Under = parsedTahouA.totalUnder;
-        parsedOdds.itb2Line = parsedTahouA.totalLine;
-        parsedOdds.rawItb2LineIndex = parsedTahouA.rawTotalLineIndex;
-        stickyLines.itb2Line = parsedTahouA.totalLine;
-      }
-    }
-
-    this.eventActiveLines.set(eventSportKey, stickyLines);
 
     const hasWdw = Object.prototype.hasOwnProperty.call(markets, 'wdw');
     const hasAhou = Object.prototype.hasOwnProperty.call(markets, 'ahou');
     const hasTahouH = Object.prototype.hasOwnProperty.call(markets, 'tahou,h') || Object.prototype.hasOwnProperty.call(markets, 'tahou_h');
     const hasTahouA = Object.prototype.hasOwnProperty.call(markets, 'tahou,a') || Object.prototype.hasOwnProperty.call(markets, 'tahou_a');
 
-    parsedOdds.updatedMarkets = {
-      wdw: hasWdw,
-      ahou: hasAhou,
-      itb1: hasTahouH,
-      itb2: hasTahouA
-    };
+    const parsedOdds = this._buildParsedOdds(
+      eventId,
+      `${eventId}:${sport}`,
+      defaultTotalLine,
+      defaultItbLine,
+      {
+        hasWdw,
+        rawWdw: markets.wdw,
+        hasAhou,
+        rawAhou: markets.ahou,
+        hasTahouH,
+        rawTahouH: markets['tahou,h'] || markets.tahou_h,
+        hasTahouA,
+        rawTahouA: markets['tahou,a'] || markets.tahou_a
+      },
+      markets
+    );
 
     logger.debug('WsFeed', `Odds tick for ${eventId}: O(${parsedOdds.totalLine || '?'})=${parsedOdds.totalOver}, 1=${parsedOdds.winHome}, 2=${parsedOdds.winAway}, ITB1(${parsedOdds.itb1Line || '?'})=${parsedOdds.itb1Over}, ITB2(${parsedOdds.itb2Line || '?'})=${parsedOdds.itb2Over}`);
 
     this.emit('odds_update', {
       eventId,
       sport,
+      periodType: isHtSport ? 'HT' : 'FT',
       competitionId,
       odds: parsedOdds,
       updatedMarkets: parsedOdds.updatedMarkets

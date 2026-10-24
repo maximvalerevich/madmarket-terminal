@@ -77,21 +77,75 @@ export class MollybetAdapter extends BaseAdapter {
 
   /**
    * Resolves the Mollybet bet_type string according to platform rules.
+   * Football ('fb' / 'fb_ht'):
    * - HOME: "for,h"
    * - AWAY: "for,a"
    * - OVER: "for,ir,<h>,<a>,ahover,<lineIndex>" or "for,ahover,<lineIndex>"
+   * Ice Hockey ('ih'):
+   * - Regular Time (FT): "for,tp,reg,ahover,<lineIndex>", "for,tp,reg,wdw,h|a", "for,tp,reg,tahover,h|a,<lineIndex>"
+   * - Period N (HT): "for,tperiod,<N>,ahover,<lineIndex>", "for,tperiod,<N>,wdw,h|a", "for,tperiod,<N>,tahover,h|a,<lineIndex>"
    *
-   * @param {'OVER' | 'HOME' | 'AWAY'} targetKey
+   * @param {'OVER' | 'HOME' | 'AWAY' | 'ITB1' | 'ITB2' | 'HT_OVER' | 'HT_HOME' | 'HT_AWAY' | 'HT_ITB1' | 'HT_ITB2'} targetKey
    * @param {Object} matchInfo
    * @returns {string}
    */
-  resolveBetType(targetKey, matchInfo) {
+  resolveBetType(targetKey, matchInfo = {}) {
     if (matchInfo.betType) {
       return matchInfo.betType;
     }
 
     if (matchInfo.targetBetTypes && matchInfo.targetBetTypes[targetKey]) {
       return matchInfo.targetBetTypes[targetKey];
+    }
+
+    const isHockey = matchInfo.sport === 'ih';
+    if (isHockey) {
+      const isPeriod = targetKey.startsWith('HT_') || matchInfo.period === 'HT';
+      const p = Number(matchInfo.hockeyPeriod) || 1;
+      const prefix = isPeriod ? `tperiod,${p}` : 'tp,reg';
+      const baseKey = targetKey.replace(/^HT_/, '');
+
+      switch (baseKey) {
+        case 'OVER': {
+          let lineIndex;
+          if (typeof matchInfo.rawTotalLineIndex === 'number' && matchInfo.rawTotalLineIndex > 0) {
+            lineIndex = matchInfo.rawTotalLineIndex;
+          } else {
+            const defLine = isPeriod ? '1.5' : '5.5';
+            const val = parseFloat(matchInfo.totalLine || defLine);
+            lineIndex = Math.round((Number.isNaN(val) ? parseFloat(defLine) : val) * 4);
+          }
+          return `for,${prefix},ahover,${lineIndex}`;
+        }
+        case 'HOME':
+          return `for,${prefix},wdw,h`;
+        case 'AWAY':
+          return `for,${prefix},wdw,a`;
+        case 'ITB1': {
+          let lineIndex;
+          if (typeof matchInfo.rawItb1LineIndex === 'number' && matchInfo.rawItb1LineIndex > 0) {
+            lineIndex = matchInfo.rawItb1LineIndex;
+          } else {
+            const defLine = isPeriod ? '0.5' : '2.5';
+            const val = parseFloat(matchInfo.itb1Line || defLine);
+            lineIndex = Math.round((Number.isNaN(val) ? parseFloat(defLine) : val) * 4);
+          }
+          return `for,${prefix},tahover,h,${lineIndex}`;
+        }
+        case 'ITB2': {
+          let lineIndex;
+          if (typeof matchInfo.rawItb2LineIndex === 'number' && matchInfo.rawItb2LineIndex > 0) {
+            lineIndex = matchInfo.rawItb2LineIndex;
+          } else {
+            const defLine = isPeriod ? '0.5' : '2.5';
+            const val = parseFloat(matchInfo.itb2Line || defLine);
+            lineIndex = Math.round((Number.isNaN(val) ? parseFloat(defLine) : val) * 4);
+          }
+          return `for,${prefix},tahover,a,${lineIndex}`;
+        }
+        default:
+          throw new Error(`Unsupported targetKey: ${targetKey}`);
+      }
     }
 
     const score = matchInfo.liveScore || { home: 0, away: 0 };
@@ -163,7 +217,8 @@ export class MollybetAdapter extends BaseAdapter {
    * @param {string} [matchInfo.totalLine]
    * @param {number} [matchInfo.rawTotalLineIndex]
    * @param {string} [matchInfo.period] - 'FT' or 'HT'
-   * @param {string} [matchInfo.sport] - 'fb' or 'fb_ht'
+   * @param {string} [matchInfo.sport] - 'fb', 'fb_ht', or 'ih'
+   * @param {number} [matchInfo.hockeyPeriod] - 1, 2, or 3
    * @param {string} [matchInfo.betType]
    * @returns {Promise<{ betslipId: string, expiryTs: number, price: number | null, maxStake: number | null, betType: string, targetKey: string, rttMs: number }>}
    */
@@ -174,8 +229,9 @@ export class MollybetAdapter extends BaseAdapter {
 
     const betType = this.resolveBetType(targetKey, matchInfo);
     const score = matchInfo.liveScore || { home: 0, away: 0 };
+    const isHockey = matchInfo.sport === 'ih';
     const isHt = targetKey.startsWith('HT_') || matchInfo.period === 'HT' || matchInfo.sport === 'fb_ht';
-    const sport = isHt ? 'fb_ht' : 'fb';
+    const sport = isHockey ? 'ih' : (isHt ? 'fb_ht' : 'fb');
 
     const payload = {
       sport,

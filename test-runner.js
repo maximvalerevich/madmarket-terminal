@@ -1263,6 +1263,269 @@ engine.on('log', (log) => logCaptured.push(log));
 
   console.log('✓ Order normalizer logic verified for WON, LOST, VOID, REJECTED_GOAL, IN_PLAY, PENDING');
 
+  // 33. Test MollybetAdapter Ice Hockey ("ih") bet_type resolution & preArmBetslip sport payload
+  const ihFtInfo = { sport: 'ih', period: 'FT', totalLine: '5.5', itb1Line: '2.5', itb2Line: '2.5', isLive: true, liveScore: { home: 2, away: 1 } };
+  assert.equal(adapter.resolveBetType('OVER', ihFtInfo), 'for,tp,reg,ahover,22');
+  assert.equal(adapter.resolveBetType('HOME', ihFtInfo), 'for,tp,reg,wdw,h');
+  assert.equal(adapter.resolveBetType('AWAY', ihFtInfo), 'for,tp,reg,wdw,a');
+  assert.equal(adapter.resolveBetType('ITB1', ihFtInfo), 'for,tp,reg,tahover,h,10');
+  assert.equal(adapter.resolveBetType('ITB2', ihFtInfo), 'for,tp,reg,tahover,a,10');
+
+  for (const p of [1, 2, 3]) {
+    const ihPeriodInfo = { sport: 'ih', period: 'HT', hockeyPeriod: p, totalLine: '1.5', itb1Line: '0.5', itb2Line: '0.5', isLive: true, liveScore: { home: 1, away: 1 } };
+    assert.equal(adapter.resolveBetType('HT_OVER', ihPeriodInfo), `for,tperiod,${p},ahover,6`);
+    assert.equal(adapter.resolveBetType('HT_HOME', ihPeriodInfo), `for,tperiod,${p},wdw,h`);
+    assert.equal(adapter.resolveBetType('HT_AWAY', ihPeriodInfo), `for,tperiod,${p},wdw,a`);
+    assert.equal(adapter.resolveBetType('HT_ITB1', ihPeriodInfo), `for,tperiod,${p},tahover,h,2`);
+    assert.equal(adapter.resolveBetType('HT_ITB2', ihPeriodInfo), `for,tperiod,${p},tahover,a,2`);
+  }
+
+  let capturedIhPayloads = [];
+  const mockIhH2 = {
+    request: async (method, path, headers, body) => {
+      if (method === 'POST') {
+        const p = typeof body === 'string' ? JSON.parse(body) : body;
+        capturedIhPayloads.push(p);
+      }
+      return {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          data: {
+            betslip_id: `slip_ih_${capturedIhPayloads.length}`,
+            expiry_ts: Math.floor(Date.now() / 1000) + 50,
+            bookies_with_offers: [['pin88', 1.92, 800]]
+          }
+        }),
+        rttMs: 0.7
+      };
+    }
+  };
+  const ihAdapter = new MollybetAdapter(testConfig, mockIhH2);
+  await ihAdapter.preArmBetslip('OVER', { eventId: 'ih_ev_1', sport: 'ih', period: 'FT', totalLine: '5.5', liveScore: { home: 2, away: 2 } });
+  await ihAdapter.preArmBetslip('HT_OVER', { eventId: 'ih_ev_1', sport: 'ih', period: 'HT', hockeyPeriod: 2, totalLine: '1.5', liveScore: { home: 1, away: 1 } });
+  assert.equal(capturedIhPayloads.length, 2);
+  assert.equal(capturedIhPayloads[0].sport, 'ih', 'FT hockey betslip payload sport must be ih');
+  assert.equal(capturedIhPayloads[0].bet_type, 'for,tp,reg,ahover,22');
+  assert.equal(capturedIhPayloads[1].sport, 'ih', 'Period hockey betslip payload sport must ALWAYS be ih');
+  assert.equal(capturedIhPayloads[1].bet_type, 'for,tperiod,2,ahover,6');
+  console.log('✓ MollybetAdapter Ice Hockey ("ih") bet_type resolution (tp,reg & tperiod,1..3) and sport payload verified');
+
+  // 34. Test WsFeed Ice Hockey event frame parsing & period auto-detection
+  const ihWsFeed = new WsFeed(testConfig);
+  let ihEventParsed = null;
+  ihWsFeed.on('event_update', (ev) => { ihEventParsed = ev; });
+
+  // P2 frame with period_scores: [[0,0],[1,1]]
+  ihWsFeed.handleMessage(JSON.stringify([
+    "event",
+    ["ih", "2026-10-24,51317,51313"],
+    {
+      event_type: "normal",
+      start_ts: "2026-10-24T17:45:00Z",
+      competition_id: 2736,
+      competition_name: "Switzerland National League A",
+      home: "SC Langnau Tigers",
+      away: "HC Davos",
+      ir_status: {
+        score: [1, 1],
+        period_scores: [[0, 0], [1, 1]],
+        period_time: 14,
+        event_stage: "2ND_PERIOD",
+        suspend: [0, 0]
+      }
+    }
+  ]), false);
+
+  assert(ihEventParsed !== null);
+  assert.equal(ihEventParsed.sport, 'ih');
+  assert.equal(ihEventParsed.hockeyPeriod, 2, 'period_scores of length 2 must auto-detect hockeyPeriod === 2');
+  assert.equal(ihEventParsed.score.home, 1);
+  assert.equal(ihEventParsed.score.away, 1);
+  assert.equal(ihEventParsed.htScore.home, 1);
+  assert.equal(ihEventParsed.htScore.away, 1);
+  assert.equal(ihEventParsed.periodScoresStr, '0:0, 1:1');
+  assert.equal(ihEventParsed.isLive, true);
+
+  // Real dump with period_time: null and event_stage: "AWAITING_EXTRA_TIME"
+  ihWsFeed.handleMessage(JSON.stringify([
+    "event",
+    ["ih", "2026-10-24,51317,51313"],
+    {
+      event_type: "normal",
+      start_ts: "2026-10-24T17:45:00Z",
+      competition_id: 2736,
+      competition_name: "Switzerland National League A",
+      home: "SC Langnau Tigers",
+      away: "HC Davos",
+      ir_status: {
+        score: [2, 2],
+        period_scores: [[0, 0], [1, 1], [1, 1]],
+        period_time: null,
+        event_stage: "AWAITING_EXTRA_TIME",
+        suspend: [1, 0]
+      }
+    }
+  ]), false);
+
+  assert.equal(ihEventParsed.hockeyPeriod, 3, 'period_scores of length 3 must auto-detect hockeyPeriod === 3');
+  assert.equal(ihEventParsed.isLive, true, 'Must remain Live during break when period_time === null');
+  assert.equal(ihEventParsed.periodScoresStr, '0:0, 1:1, 1:1');
+  console.log('✓ WsFeed Ice Hockey event frame parsing and period auto-detection verified');
+
+  // 35. Test WsFeed Ice Hockey offers_hcap parsing (including nested [null, ...] & dual FT+HT emit)
+  const ihOffersEvents = [];
+  ihWsFeed.on('odds_update', (data) => { ihOffersEvents.push(data); });
+
+  // Real dump nested format: [["offers_hcap",[1294,"ih","2026-10-25,10043989,29080"],{"time_win,tp,all,ml":[null,[["a",1.589],["h",2.61]]]}]]
+  ihWsFeed.handleMessage(JSON.stringify([
+    ["offers_hcap", [1294, "ih", "2026-10-25,10043989,29080"], {
+      "time_win,tp,all,ml": [null, [["a", 1.589], ["h", 2.61]]]
+    }]
+  ]), false);
+
+  assert.equal(ihOffersEvents.length, 1);
+  assert.equal(ihOffersEvents[0].sport, 'ih');
+  assert.equal(ihOffersEvents[0].periodType, 'FT');
+  assert.equal(ihOffersEvents[0].odds.winHome, 2.61);
+  assert.equal(ihOffersEvents[0].odds.winAway, 1.589);
+
+  // Combined frame with both tp,reg (FT) and tperiod,2 (HT) markets
+  ihOffersEvents.length = 0;
+  ihWsFeed.eventHockeyPeriods.set("ih_combo_ev", 2);
+  ihWsFeed.handleMessage(JSON.stringify([
+    "offers_hcap",
+    [2736, "ih", "ih_combo_ev"],
+    {
+      "tp,reg,wdw": [null, [["h", 2.15], ["d", 4.10], ["a", 2.85]]],
+      "tp,reg,ahou": [[22, [["over", 1.95], ["under", 1.85]]]],
+      "tp,reg,tahou,h": [[10, [["over", 1.88], ["under", 1.92]]]],
+      "tperiod,2,wdw": [null, [["h", 2.50], ["d", 2.75], ["a", 3.10]]],
+      "tperiod,2,ahou": [[6, [["over", 2.02], ["under", 1.80]]]],
+      "tperiod,2,tahou,a": [[2, [["over", 1.74], ["under", 2.06]]]]
+    }
+  ]), false);
+
+  assert.equal(ihOffersEvents.length, 2, 'Combined ih frame with tp,reg and tperiod,2 must emit 2 separate odds_update events (FT & HT)');
+  const ftUpdate = ihOffersEvents.find(e => e.periodType === 'FT');
+  const htUpdate = ihOffersEvents.find(e => e.periodType === 'HT');
+  assert(ftUpdate !== undefined && htUpdate !== undefined);
+  assert.equal(ftUpdate.odds.winHome, 2.15);
+  assert.equal(ftUpdate.odds.totalOver, 1.95);
+  assert.equal(ftUpdate.odds.totalLine, '5.50');
+  assert.equal(ftUpdate.odds.itb1Over, 1.88);
+  assert.equal(htUpdate.hockeyPeriod, 2);
+  assert.equal(htUpdate.odds.winHome, 2.50);
+  assert.equal(htUpdate.odds.totalOver, 2.02);
+  assert.equal(htUpdate.odds.totalLine, '1.50');
+  assert.equal(htUpdate.odds.itb2Over, 1.74);
+  ihWsFeed.destroy();
+  console.log('✓ WsFeed Ice Hockey offers_hcap parsing (nested [null,...] & dual FT/HT dispatch) verified');
+
+  // 36. Test StateManager automatic period transition (P1 -> P2) & coupon re-arming for Ice Hockey
+  const ihArmedCalls = [];
+  const ihDeletedSlips = [];
+  const mockIhTransitionH2 = {
+    request: async (method, path, headers, body) => {
+      if (method === 'DELETE') {
+        const parts = path.split('/').filter(Boolean);
+        ihDeletedSlips.push(parts.pop());
+        return { status: 200, headers: {}, body: JSON.stringify({ status: 'ok' }), rttMs: 0.5 };
+      }
+      if (method === 'POST') {
+        const payload = typeof body === 'string' ? JSON.parse(body) : body;
+        ihArmedCalls.push(payload);
+        return {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({
+            data: {
+              betslip_id: `slip_ih_p_${ihArmedCalls.length}`,
+              expiry_ts: Math.floor(Date.now() / 1000) + 55,
+              bookies_with_offers: [['pin88', 1.95, 500]]
+            }
+          }),
+          rttMs: 0.6
+        };
+      }
+      return { status: 200, headers: {}, body: '{}', rttMs: 0.5 };
+    }
+  };
+  const ihTransAdapter = new MollybetAdapter(testConfig, mockIhTransitionH2);
+  const smIh = new StateManager(testConfig);
+  smIh.setAdapter(ihTransAdapter);
+
+  // Add 1 Football and 1 Hockey match to verify sport filtering in getSoccerList
+  smIh.updateEventMetadata({
+    eventId: 'fb_match_1',
+    sport: 'fb',
+    homeTeam: 'Arsenal',
+    awayTeam: 'Chelsea',
+    isLive: true,
+    score: { home: 1, away: 0 }
+  });
+  smIh.updateEventMetadata({
+    eventId: 'ih_match_1',
+    sport: 'ih',
+    homeTeam: 'SC Langnau Tigers',
+    awayTeam: 'HC Davos',
+    isLive: true,
+    hockeyPeriod: 1,
+    score: { home: 0, away: 0 },
+    htScore: { home: 0, away: 0 },
+    periodScores: [[0, 0]],
+    periodScoresStr: '0:0'
+  });
+
+  assert.equal(smIh.getSoccerList('LIVE', 'ALL_SPORTS').list.length, 2);
+  assert.equal(smIh.getSoccerList('LIVE', 'FB').list.length, 1);
+  assert.equal(smIh.getSoccerList('LIVE', 'IH').list.length, 1);
+  assert.equal(smIh.getSoccerList('LIVE', 'IH').list[0].eventId, 'ih_match_1');
+
+  // Activate hockey match and switch to Period mode (HT -> P1)
+  smIh.setActiveEvent('ih_match_1');
+  assert.equal(smIh.liveOdds.ft.totalLine, '5.5');
+  assert.equal(smIh.liveOdds.ft.itb1Line, '2.5');
+  assert.equal(smIh.liveOdds.ht.totalLine, '1.5');
+  assert.equal(smIh.liveOdds.ht.itb1Line, '0.5');
+
+  await smIh.setPeriod('HT');
+  assert.equal(smIh.activePeriod, 'HT');
+  assert.equal(smIh.currentHockeyPeriod, 1);
+  assert(smIh.armedBetslips.OVER.betType.includes('tperiod,1,ahover,6'), 'Must arm P1 over with tperiod,1');
+  const p1OverSlipId = smIh.armedBetslips.OVER.betslipId;
+  assert(p1OverSlipId !== null);
+
+  // Now simulate P1 -> P2 transition via event_update frame
+  let periodChangedEvent = null;
+  smIh.on('hockey_period_changed', (ev) => { periodChangedEvent = ev; });
+
+  smIh.updateEventMetadata({
+    eventId: 'ih_match_1',
+    sport: 'ih',
+    hockeyPeriod: 2,
+    score: { home: 0, away: 0 },
+    htScore: { home: 0, away: 0 },
+    periodScores: [[0, 0], [0, 0]],
+    periodScoresStr: '0:0, 0:0',
+    isLive: true
+  });
+
+  // Wait for async refreshAllBetslips(true) to complete
+  await new Promise(r => setTimeout(r, 350));
+
+  assert(periodChangedEvent !== null, 'hockey_period_changed event must fire on P1 -> P2');
+  assert.equal(periodChangedEvent.prevPeriod, 1);
+  assert.equal(periodChangedEvent.newPeriod, 2);
+  assert.equal(smIh.currentHockeyPeriod, 2);
+  assert(ihDeletedSlips.includes(p1OverSlipId), 'Old P1 betslip must be deleted on period change');
+  assert.equal(smIh.armedBetslips.OVER.betType, 'for,tperiod,2,ahover,6', 'New betslip must be armed for P2 (tperiod,2)');
+  assert.equal(smIh.armedBetslips.HOME.betType, 'for,tperiod,2,wdw,h', 'New HOME betslip must be armed for P2 (tperiod,2)');
+  assert.equal(smIh.armedBetslips.AWAY.betType, 'for,tperiod,2,wdw,a', 'New AWAY betslip must be armed for P2 (tperiod,2)');
+
+  smIh.destroy();
+  console.log('✓ StateManager automatic hockey period switch (P1 -> P2) & coupon re-arming verified');
+
   stickyWsFeed.destroy();
   smHt.destroy();
   testWsFeed.destroy();

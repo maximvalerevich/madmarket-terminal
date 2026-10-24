@@ -39,6 +39,9 @@ export class StateManager extends EventEmitter {
     this.liveScoreFt = { home: 0, away: 0 };
     this.liveScoreHt = { home: 0, away: 0 };
 
+    /** @type {1 | 2 | 3} Current active period for ice hockey ('ih') matches */
+    this.currentHockeyPeriod = 1;
+
     /**
      * User manual line selections per event and market: eventId -> { 'FT_OVER': { totalLine, rawTotalLineIndex }, ... }
      * @type {Map<string, Object>}
@@ -240,12 +243,37 @@ export class StateManager extends EventEmitter {
   }
 
   /**
-   * Creates a clean default odds structure for a specific period.
+   * Creates a clean default odds structure for a specific period and sport.
    * @param {'FT' | 'HT'} [period='FT']
+   * @param {string} [sport='fb']
    * @returns {Object}
    */
-  createEmptyPeriodOdds(period = 'FT') {
+  createEmptyPeriodOdds(period = 'FT', sport = 'fb') {
     const isHt = period === 'HT';
+    const isHockey = sport === 'ih';
+    if (isHockey) {
+      return {
+        totalOver: 0,
+        totalUnder: 0,
+        winHome: 0,
+        winDraw: 0,
+        winAway: 0,
+        totalLine: isHt ? '1.5' : '5.5',
+        rawTotalLineIndex: isHt ? 6 : 22,
+        totalLines: [],
+        itb1Over: 0,
+        itb1Under: 0,
+        itb1Line: isHt ? '0.5' : '2.5',
+        rawItb1LineIndex: isHt ? 2 : 10,
+        itb1Lines: [],
+        itb2Over: 0,
+        itb2Under: 0,
+        itb2Line: isHt ? '0.5' : '2.5',
+        rawItb2LineIndex: isHt ? 2 : 10,
+        itb2Lines: []
+      };
+    }
+
     return {
       totalOver: 0,
       totalUnder: 0,
@@ -562,6 +590,11 @@ export class StateManager extends EventEmitter {
 
     const event = this.eventsMap.get(this.activeEventId);
     if (event) {
+      const evSport = String(event.sport || 'fb');
+      if (evSport === 'ih') {
+        this.currentHockeyPeriod = Number(event.hockeyPeriod) || 1;
+      }
+
       if (event.ftScore) {
         this.liveScoreFt = { ...event.ftScore };
       } else if (event.score) {
@@ -569,17 +602,19 @@ export class StateManager extends EventEmitter {
       }
       if (event.htScore) {
         this.liveScoreHt = { ...event.htScore };
+      } else {
+        this.liveScoreHt = { home: 0, away: 0 };
       }
 
       this.liveScore = this.activePeriod === 'HT' ? { ...this.liveScoreHt } : { ...this.liveScoreFt };
 
       // Reset liveOdds cleanly for the incoming match so prices from previous match never leak
       this.liveOdds.ft = event.odds?.ft
-        ? { ...this.createEmptyPeriodOdds('FT'), ...event.odds.ft }
-        : (event.odds ? { ...this.createEmptyPeriodOdds('FT'), ...event.odds } : this.createEmptyPeriodOdds('FT'));
+        ? { ...this.createEmptyPeriodOdds('FT', evSport), ...event.odds.ft }
+        : (event.odds ? { ...this.createEmptyPeriodOdds('FT', evSport), ...event.odds } : this.createEmptyPeriodOdds('FT', evSport));
       this.liveOdds.ht = event.odds?.ht
-        ? { ...this.createEmptyPeriodOdds('HT'), ...event.odds.ht }
-        : this.createEmptyPeriodOdds('HT');
+        ? { ...this.createEmptyPeriodOdds('HT', evSport), ...event.odds.ht }
+        : this.createEmptyPeriodOdds('HT', evSport);
 
       if (this.wsFeed) {
         this.wsFeed.subscribeToEvent(event.competitionId, event.sport, this.activeEventId);
@@ -589,6 +624,7 @@ export class StateManager extends EventEmitter {
       this.liveScoreFt = { home: 0, away: 0 };
       this.liveScoreHt = { home: 0, away: 0 };
       this.liveScore = { home: 0, away: 0 };
+      this.currentHockeyPeriod = 1;
       this.liveOdds.ft = this.createEmptyPeriodOdds('FT');
       this.liveOdds.ht = this.createEmptyPeriodOdds('HT');
     }
@@ -648,14 +684,28 @@ export class StateManager extends EventEmitter {
     if (!eventId) return;
 
     const existing = this.eventsMap.get(eventId) || {};
+    const prevHockeyPeriod = existing.hockeyPeriod || (this.activeEventId === eventId ? this.currentHockeyPeriod : 1) || 1;
+    const sport = String(data.sport || existing.sport || 'fb');
+    const isHockey = sport === 'ih';
+    const isHtSport = sport === 'fb_ht';
+
     const updated = {
       ...existing,
       ...data,
+      sport: (existing.sport && existing.sport !== 'fb_ht' && isHtSport) ? existing.sport : sport,
       lastUpdate: Date.now()
     };
 
-    const sport = String(data.sport || 'fb');
-    const isHtSport = sport === 'fb_ht';
+    if (isHockey) {
+      const newHockeyPeriod = Number(data.hockeyPeriod || existing.hockeyPeriod) || 1;
+      updated.hockeyPeriod = newHockeyPeriod;
+      if (data.htScore) {
+        updated.htScore = {
+          home: Number(data.htScore.home) || 0,
+          away: Number(data.htScore.away) || 0
+        };
+      }
+    }
 
     if (data.score) {
       const incomingScore = {
@@ -675,6 +725,41 @@ export class StateManager extends EventEmitter {
     this.eventsMap.set(eventId, updated);
 
     if (this.activeEventId === eventId) {
+      let hockeyPeriodSwitched = false;
+      if (isHockey) {
+        const newHockeyPeriod = updated.hockeyPeriod || 1;
+        this.currentHockeyPeriod = newHockeyPeriod;
+
+        if (prevHockeyPeriod !== newHockeyPeriod) {
+          hockeyPeriodSwitched = true;
+          this.liveScoreHt = updated.htScore ? { ...updated.htScore } : { home: 0, away: 0 };
+          this.liveOdds.ht = this.createEmptyPeriodOdds('HT', 'ih');
+          if (updated.odds) {
+            updated.odds.ht = this.createEmptyPeriodOdds('HT', 'ih');
+          }
+
+          if (this.activePeriod === 'HT') {
+            this.liveScore = { ...this.liveScoreHt };
+            logger.warn('StateManager', `HOCKEY PERIOD CHANGED in match ${eventId}: P${prevHockeyPeriod} -> P${newHockeyPeriod}! Resetting period betslips and re-arming for P${newHockeyPeriod}!`);
+
+            if (this.adapter) {
+              for (const key of ['OVER', 'HOME', 'AWAY', 'ITB1', 'ITB2']) {
+                const slip = this.armedBetslips[key];
+                if (slip && slip.betslipId) {
+                  this.adapter.deleteBetslip(slip.betslipId).catch(() => {});
+                  slip.betslipId = null;
+                }
+              }
+            }
+
+            this.armedBetslips = this.createEmptySlips('HT', this.activeMarketMode);
+            this.armedPool.set(this.activeEventId, this.armedBetslips);
+            this.emit('hockey_period_changed', { eventId, prevPeriod: prevHockeyPeriod, newPeriod: newHockeyPeriod });
+            this.refreshAllBetslips(true);
+          }
+        }
+      }
+
       if (data.score) {
         const incomingScore = {
           home: Number(data.score.home) || 0,
@@ -700,6 +785,21 @@ export class StateManager extends EventEmitter {
           const newFt = `${incomingScore.home}-${incomingScore.away}`;
           this.liveScoreFt = incomingScore;
 
+          if (isHockey && updated.htScore && !hockeyPeriodSwitched) {
+            const prevHt = `${this.liveScoreHt.home}-${this.liveScoreHt.away}`;
+            const newHt = `${updated.htScore.home}-${updated.htScore.away}`;
+            this.liveScoreHt = { ...updated.htScore };
+            if (this.activePeriod === 'HT') {
+              const prevActive = `${this.liveScore.home}-${this.liveScore.away}`;
+              this.liveScore = { ...this.liveScoreHt };
+              if (prevHt !== newHt && prevActive !== newHt) {
+                logger.warn('StateManager', `GOAL DETECTED in hockey match ${eventId} [P${this.currentHockeyPeriod}]: ${prevHt} -> ${newHt}! Refreshing betslips immediately!`);
+                this.emit('score_changed', { eventId, score: this.liveScore });
+                this.refreshAllBetslips(true);
+              }
+            }
+          }
+
           if (this.activePeriod === 'FT') {
             const prevActive = `${this.liveScore.home}-${this.liveScore.away}`;
             this.liveScore = { ...incomingScore };
@@ -718,7 +818,7 @@ export class StateManager extends EventEmitter {
 
   /**
    * Updates odds from WebSocket offers_hcap / offers_event frame.
-   * Differentiates full-time (fb) and half-time (fb_ht) markets.
+   * Differentiates full-time (fb / ih FT) and period/half-time (fb_ht / ih HT) markets.
    * When a bookmaker closes/suspends a market, sets price to 0 without fabricating or keeping stale odds.
    * @param {Object} data
    */
@@ -726,11 +826,20 @@ export class StateManager extends EventEmitter {
     const { eventId, sport, odds, updatedMarkets } = data;
     if (!eventId || !odds) return;
 
-    const isHt = sport === 'fb_ht';
+    const isHt = sport === 'fb_ht' || data.periodType === 'HT';
     const targetPeriod = isHt ? 'ht' : 'ft';
 
     const event = this.eventsMap.get(eventId);
+    const isHockey = sport === 'ih' || event?.sport === 'ih';
+    const defTotalLine = isHockey ? (isHt ? '1.5' : '5.5') : (isHt ? '0.5' : '2.5');
+    const defTotalIdx = isHockey ? (isHt ? 6 : 22) : (isHt ? 2 : 10);
+    const defItbLine = isHockey ? (isHt ? '0.5' : '2.5') : (isHt ? '0.5' : '1.5');
+    const defItbIdx = isHockey ? (isHt ? 2 : 10) : (isHt ? 2 : 6);
+
     if (event) {
+      if (isHockey && data.hockeyPeriod && !event.hockeyPeriod) {
+        event.hockeyPeriod = data.hockeyPeriod;
+      }
       if (!event.odds) {
         event.odds = { ft: {}, ht: {} };
       } else if (!event.odds.ft) {
@@ -747,18 +856,18 @@ export class StateManager extends EventEmitter {
           winHome: updatedMarkets.wdw ? (odds.winHome || 0) : (prevPeriodOdds.winHome || 0),
           winDraw: updatedMarkets.wdw ? (odds.winDraw || 0) : (prevPeriodOdds.winDraw || 0),
           winAway: updatedMarkets.wdw ? (odds.winAway || 0) : (prevPeriodOdds.winAway || 0),
-          totalLine: odds.totalLine || prevPeriodOdds.totalLine || (isHt ? '0.5' : '2.5'),
-          rawTotalLineIndex: odds.rawTotalLineIndex ?? prevPeriodOdds.rawTotalLineIndex ?? (isHt ? 2 : 10),
+          totalLine: odds.totalLine || prevPeriodOdds.totalLine || defTotalLine,
+          rawTotalLineIndex: odds.rawTotalLineIndex ?? prevPeriodOdds.rawTotalLineIndex ?? defTotalIdx,
           totalLines: (odds.totalLines && odds.totalLines.length > 0) ? odds.totalLines : (prevPeriodOdds.totalLines || []),
           itb1Over: updatedMarkets.itb1 ? (odds.itb1Over || 0) : (prevPeriodOdds.itb1Over || 0),
           itb1Under: updatedMarkets.itb1 ? (odds.itb1Under || 0) : (prevPeriodOdds.itb1Under || 0),
-          itb1Line: odds.itb1Line || prevPeriodOdds.itb1Line || (isHt ? '0.5' : '1.5'),
-          rawItb1LineIndex: odds.rawItb1LineIndex ?? prevPeriodOdds.rawItb1LineIndex ?? (isHt ? 2 : 6),
+          itb1Line: odds.itb1Line || prevPeriodOdds.itb1Line || defItbLine,
+          rawItb1LineIndex: odds.rawItb1LineIndex ?? prevPeriodOdds.rawItb1LineIndex ?? defItbIdx,
           itb1Lines: (odds.itb1Lines && odds.itb1Lines.length > 0) ? odds.itb1Lines : (prevPeriodOdds.itb1Lines || []),
           itb2Over: updatedMarkets.itb2 ? (odds.itb2Over || 0) : (prevPeriodOdds.itb2Over || 0),
           itb2Under: updatedMarkets.itb2 ? (odds.itb2Under || 0) : (prevPeriodOdds.itb2Under || 0),
-          itb2Line: odds.itb2Line || prevPeriodOdds.itb2Line || (isHt ? '0.5' : '1.5'),
-          rawItb2LineIndex: odds.rawItb2LineIndex ?? prevPeriodOdds.rawItb2LineIndex ?? (isHt ? 2 : 6),
+          itb2Line: odds.itb2Line || prevPeriodOdds.itb2Line || defItbLine,
+          rawItb2LineIndex: odds.rawItb2LineIndex ?? prevPeriodOdds.rawItb2LineIndex ?? defItbIdx,
           itb2Lines: (odds.itb2Lines && odds.itb2Lines.length > 0) ? odds.itb2Lines : (prevPeriodOdds.itb2Lines || [])
         };
       } else {
@@ -769,18 +878,18 @@ export class StateManager extends EventEmitter {
           winHome: (odds.winHome && odds.winHome > 0) ? odds.winHome : (prevPeriodOdds.winHome || 0),
           winDraw: (odds.winDraw && odds.winDraw > 0) ? odds.winDraw : (prevPeriodOdds.winDraw || 0),
           winAway: (odds.winAway && odds.winAway > 0) ? odds.winAway : (prevPeriodOdds.winAway || 0),
-          totalLine: odds.totalLine || prevPeriodOdds.totalLine || (isHt ? '0.5' : '2.5'),
-          rawTotalLineIndex: odds.rawTotalLineIndex ?? prevPeriodOdds.rawTotalLineIndex ?? (isHt ? 2 : 10),
+          totalLine: odds.totalLine || prevPeriodOdds.totalLine || defTotalLine,
+          rawTotalLineIndex: odds.rawTotalLineIndex ?? prevPeriodOdds.rawTotalLineIndex ?? defTotalIdx,
           totalLines: (odds.totalLines && odds.totalLines.length > 0) ? odds.totalLines : (prevPeriodOdds.totalLines || []),
           itb1Over: (odds.itb1Over && odds.itb1Over > 0) ? odds.itb1Over : (prevPeriodOdds.itb1Over || 0),
           itb1Under: (odds.itb1Under && odds.itb1Under > 0) ? odds.itb1Under : (prevPeriodOdds.itb1Under || 0),
-          itb1Line: odds.itb1Line || prevPeriodOdds.itb1Line || (isHt ? '0.5' : '1.5'),
-          rawItb1LineIndex: odds.rawItb1LineIndex ?? prevPeriodOdds.rawItb1LineIndex ?? (isHt ? 2 : 6),
+          itb1Line: odds.itb1Line || prevPeriodOdds.itb1Line || defItbLine,
+          rawItb1LineIndex: odds.rawItb1LineIndex ?? prevPeriodOdds.rawItb1LineIndex ?? defItbIdx,
           itb1Lines: (odds.itb1Lines && odds.itb1Lines.length > 0) ? odds.itb1Lines : (prevPeriodOdds.itb1Lines || []),
           itb2Over: (odds.itb2Over && odds.itb2Over > 0) ? odds.itb2Over : (prevPeriodOdds.itb2Over || 0),
           itb2Under: (odds.itb2Under && odds.itb2Under > 0) ? odds.itb2Under : (prevPeriodOdds.itb2Under || 0),
-          itb2Line: odds.itb2Line || prevPeriodOdds.itb2Line || (isHt ? '0.5' : '1.5'),
-          rawItb2LineIndex: odds.rawItb2LineIndex ?? prevPeriodOdds.rawItb2LineIndex ?? (isHt ? 2 : 6),
+          itb2Line: odds.itb2Line || prevPeriodOdds.itb2Line || defItbLine,
+          rawItb2LineIndex: odds.rawItb2LineIndex ?? prevPeriodOdds.rawItb2LineIndex ?? defItbIdx,
           itb2Lines: (odds.itb2Lines && odds.itb2Lines.length > 0) ? odds.itb2Lines : (prevPeriodOdds.itb2Lines || [])
         };
       }
@@ -1129,6 +1238,7 @@ export class StateManager extends EventEmitter {
       }
 
       const activeEv = this.eventsMap.get(eventId);
+      const isHockey = activeEv?.sport === 'ih';
       const isHt = targetKey.startsWith('HT_') || this.activePeriod === 'HT';
       const score = (eventId === this.activeEventId)
         ? (isHt ? this.liveScoreHt : this.liveScoreFt)
@@ -1137,17 +1247,26 @@ export class StateManager extends EventEmitter {
         ? (isHt ? this.liveOdds.ht : this.liveOdds.ft)
         : (activeEv?.odds ? (isHt ? (activeEv.odds.ht || {}) : (activeEv.odds.ft || activeEv.odds)) : {});
 
+      const defTotalLine = isHockey ? (isHt ? '1.5' : '5.5') : (isHt ? '0.5' : '2.5');
+      const defTotalIdx = isHockey ? (isHt ? 6 : 22) : (isHt ? 2 : 10);
+      const defItbLine = isHockey ? (isHt ? '0.5' : '2.5') : (isHt ? '0.5' : '1.5');
+      const defItbIdx = isHockey ? (isHt ? 2 : 10) : (isHt ? 2 : 6);
+      const hockeyPeriod = (eventId === this.activeEventId)
+        ? (this.currentHockeyPeriod || activeEv?.hockeyPeriod || 1)
+        : (activeEv?.hockeyPeriod || 1);
+
       const matchInfo = {
         eventId,
         liveScore: score,
-        totalLine: odds.totalLine || (isHt ? '0.5' : '2.5'),
-        rawTotalLineIndex: odds.rawTotalLineIndex ?? (isHt ? 2 : 10),
-        itb1Line: odds.itb1Line || (isHt ? '0.5' : '1.5'),
-        rawItb1LineIndex: odds.rawItb1LineIndex ?? (isHt ? 2 : 6),
-        itb2Line: odds.itb2Line || (isHt ? '0.5' : '1.5'),
-        rawItb2LineIndex: odds.rawItb2LineIndex ?? (isHt ? 2 : 6),
+        totalLine: odds.totalLine || defTotalLine,
+        rawTotalLineIndex: odds.rawTotalLineIndex ?? defTotalIdx,
+        itb1Line: odds.itb1Line || defItbLine,
+        rawItb1LineIndex: odds.rawItb1LineIndex ?? defItbIdx,
+        itb2Line: odds.itb2Line || defItbLine,
+        rawItb2LineIndex: odds.rawItb2LineIndex ?? defItbIdx,
         period: isHt ? 'HT' : 'FT',
-        sport: isHt ? 'fb_ht' : 'fb',
+        sport: isHockey ? 'ih' : (isHt ? 'fb_ht' : 'fb'),
+        hockeyPeriod: isHockey ? hockeyPeriod : undefined,
         isLive: Boolean(activeEv?.isLive || score.home > 0 || score.away > 0)
       };
 
@@ -1740,52 +1859,83 @@ export class StateManager extends EventEmitter {
   }
 
   /**
-   * Returns list of soccer games formatted for menu selection.
-   * @param {'LIVE' | 'ALL'} [mode='LIVE']
+   * Returns list of soccer & ice hockey games formatted for menu selection.
+   * Supports filtering by mode ('LIVE' | 'ALL') and sport ('ALL_SPORTS' | 'FB' | 'IH').
+   * @param {'LIVE' | 'ALL' | 'ALL_SPORTS' | 'FB' | 'IH'} [mode='LIVE']
+   * @param {'ALL_SPORTS' | 'FB' | 'IH'} [sportFilter='ALL_SPORTS']
    * @returns {{ list: Array<Object>, totalCount: number, liveCount: number }}
    */
-  getSoccerList(mode = 'LIVE') {
+  getSoccerList(mode = 'LIVE', sportFilter = 'ALL_SPORTS') {
+    let effMode = mode;
+    let effSport = sportFilter;
+    if (mode === 'FB' || mode === 'IH' || mode === 'ALL_SPORTS') {
+      effSport = mode;
+      effMode = 'ALL';
+    }
+
     const allList = [];
     const liveList = [];
 
     for (const [id, ev] of this.eventsMap.entries()) {
       const sport = String(ev.sport || 'fb');
-      if (sport.startsWith('fb')) {
-        const hasArmed = this.armedPool.has(id);
-        const isActive = id === this.activeEventId;
-        const lastOrder = ev.lastOrder || null;
-        const item = {
-          eventId: id,
-          sport: ev.sport,
-          competitionId: ev.competitionId,
-          homeTeam: ev.homeTeam || 'Home',
-          awayTeam: ev.awayTeam || 'Away',
-          competition: ev.competition || 'Soccer',
-          score: ev.score || { home: 0, away: 0 },
-          minute: ev.minute || '',
-          isLive: Boolean(ev.isLive),
-          startTs: ev.startTs || '',
-          hasArmed,
-          isActive,
-          lastOrder,
-          odds: ev.odds || null
-        };
+      const isFb = sport.startsWith('fb');
+      const isIh = sport === 'ih';
+      if (!isFb && !isIh) continue;
+      if (effSport === 'FB' && !isFb) continue;
+      if (effSport === 'IH' && !isIh) continue;
 
-        allList.push(item);
-        if (ev.isLive) {
-          liveList.push(item);
-        }
+      const hasArmed = this.armedPool.has(id);
+      const isActive = id === this.activeEventId;
+      const lastOrder = ev.lastOrder || null;
+      const normalizedOdds = ev.odds
+        ? (ev.odds.ft ? { ...ev.odds.ft, ft: ev.odds.ft, ht: ev.odds.ht } : ev.odds)
+        : null;
+
+      const item = {
+        eventId: id,
+        sport: isIh ? 'ih' : ev.sport,
+        competitionId: ev.competitionId,
+        homeTeam: ev.homeTeam || 'Home',
+        awayTeam: ev.awayTeam || 'Away',
+        competition: ev.competition || (isIh ? 'Ice Hockey' : 'Soccer'),
+        score: ev.ftScore || ev.score || { home: 0, away: 0 },
+        htScore: ev.htScore || null,
+        hockeyPeriod: isIh ? (ev.hockeyPeriod || 1) : null,
+        periodScores: ev.periodScores || null,
+        periodScoresStr: ev.periodScoresStr || '',
+        minute: ev.minute || '',
+        isLive: Boolean(ev.isLive),
+        startTs: ev.startTs || '',
+        hasArmed,
+        isActive,
+        lastOrder,
+        odds: normalizedOdds
+      };
+
+      allList.push(item);
+      if (ev.isLive) {
+        liveList.push(item);
       }
     }
 
     liveList.sort((a, b) => b.isLive - a.isLive);
-    const activeList = (mode === 'LIVE' && liveList.length > 0) ? liveList : allList;
+    const activeList = (effMode === 'LIVE' && liveList.length > 0) ? liveList : allList;
 
     return {
       list: activeList,
       totalCount: allList.length,
       liveCount: liveList.length
     };
+  }
+
+  /**
+   * Alias for getSoccerList supporting multi-sport (Football & Ice Hockey) match list retrieval.
+   * @param {'LIVE' | 'ALL'} [mode='LIVE']
+   * @param {'ALL_SPORTS' | 'FB' | 'IH'} [sportFilter='ALL_SPORTS']
+   * @returns {{ list: Array<Object>, totalCount: number, liveCount: number }}
+   */
+  getMatchesList(mode = 'LIVE', sportFilter = 'ALL_SPORTS') {
+    return this.getSoccerList(mode, sportFilter);
   }
 
   /**

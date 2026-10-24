@@ -104,6 +104,8 @@ User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 ### 3.3 Bet-Type String Encoding Rules
 Mollybet encodes handicap quarter-lines as integers multiplied by 4 (`lineIndex = Math.round(line * 4)`):
+
+#### Football (`"fb"` / `"fb_ht"`)
 - **Full-Time Total Over**: `for,ir,<h>,<a>,ahover,<lineIndex>` (e.g. Total Over 2.5 at 0-0 $\rightarrow$ `for,ir,0,0,ahover,10`)
 - **Full-Time 1X2 Moneyline**: `for,h` (Home), `for,a` (Away)
 - **Individual Team Totals (ITB)**:
@@ -112,6 +114,18 @@ Mollybet encodes handicap quarter-lines as integers multiplied by 4 (`lineIndex 
 - **1st Half (HT) Markets**:
   - Sent with `"sport": "fb_ht"`.
   - HT Total Over 0.5 at 0-0 $\rightarrow$ `for,ir,0,0,ahover,2`.
+
+#### Ice Hockey (`"ih"`)
+- Always sent with `"sport": "ih"` in `POST /v1/betslips/` (for both Regular Time 60m and Period markets), and **without** `ir,<h>,<a>` in `bet_type`:
+- **Regular Time 60m (`FT`, prefix `tp,reg`)**:
+  - `OVER` (Default line `5.5` $\rightarrow$ `22`): `for,tp,reg,ahover,<lineIndex>`
+  - `HOME` / `AWAY` (1X2 60m): `for,tp,reg,wdw,h` / `for,tp,reg,wdw,a`
+  - `ITB1` / `ITB2` (Default line `2.5` $\rightarrow$ `10`): `for,tp,reg,tahover,h,<lineIndex>` / `for,tp,reg,tahover,a,<lineIndex>`
+- **Current Period $N \in \{1, 2, 3\}$ (`HT`, prefix `tperiod,<N>`)**:
+  - Automatically tracks active period $N$ from `ir_status.period_scores`:
+  - `HT_OVER` (Default line `1.5` $\rightarrow$ `6`): `for,tperiod,<N>,ahover,<lineIndex>`
+  - `HT_HOME` / `HT_AWAY`: `for,tperiod,<N>,wdw,h` / `for,tperiod,<N>,wdw,a`
+  - `HT_ITB1` / `HT_ITB2` (Default line `0.5` $\rightarrow$ `2`): `for,tperiod,<N>,tahover,h,<lineIndex>` / `for,tperiod,<N>,tahover,a,<lineIndex>`
 
 ---
 
@@ -156,8 +170,10 @@ Mollybet encodes handicap quarter-lines as integers multiplied by 4 (`lineIndex 
 - For Main Totals (`ahou`), it picks the line closest to `1.95` (even money) to offer the most balanced handicap.
 - For Individual Totals (`tahou`), it uses `lowest` mode to automatically latch onto the lowest available line (e.g. `0.5`) with odds > 1.0, and holds it until suspended (sticky line).
 
-### 4.8 Alphanumeric Match Searching
-- In the Match Selection menu, direct typing triggers an instant local filter by home or away team name, allowing fast combat deployment in feeds with 200+ live matches.
+### 4.8 Alphanumeric Match Searching & Multi-Sport Support (`FB` + `IH`)
+- Supports **Football (`fb` / `fb_ht`)** and **Ice Hockey (`ih`)** simultaneously in the live feed and Match Selection Menu (`[FB]` green / `[IH]` cyan badges).
+- Automatic period detection (`P1` / `P2` / `P3`) for Ice Hockey via `ir_status.period_scores`, with automatic betslip teardown and re-arming when a period ends and the next period begins (`P1 -> P2 -> P3`).
+- In the Match Selection menu, direct typing triggers an instant local filter by home or away team name, while `H`/`Ctrl+H` and `F`/`Ctrl+F` filter by sport.
 
 
 ---
@@ -227,10 +243,12 @@ Mollybet encodes handicap quarter-lines as integers multiplied by 4 (`lineIndex 
 | :--- | :--- |
 | **`UP` / `DOWN`** | Navigate match list. |
 | **`ENTER` / `SPACE`** | Select match and pre-arm 3 slips in combat pool. |
-| **`L`** | Filter list: Show **Live Only**. |
-| **`A`** | Filter list: Show **All Matches**. |
+| **`H` / `Ctrl+H`** | Filter list: Toggle **Ice Hockey Only (`[IH]`)**. |
+| **`F` / `Ctrl+F`** | Filter list: Toggle **Football Only (`[FB]`)**. |
+| **`L` / `Ctrl+L`** | Filter list: Show **Live Only**. |
+| **`A` / `Ctrl+A`** | Filter list: Show **All Matches** (all sports). |
 | **`1-9` + `ENTER`** | Fast select by match row number. |
-| **`ESC` / `M`** | Return to Combat HUD. |
+| **`ESC` / `M`** | Clear search query or return to Combat HUD. |
 
 ---
 
@@ -264,10 +282,30 @@ Outputs:
 ✓ WsFeed tahou (ITB1 / ITB2) offers parsing verified
 ✓ StateManager Market Modes (MAIN <-> ITB) & 3-slip quota isolation verified
 ✓ ExecutionEngine async order lifecycle tracking (in-flight -> done / rejected) verified
+✓ ExecutionEngine clamps stake to per-outcome limit (30 → 25.78) without touching configured stake
+✓ ExecutionEngine partial fill recognized (€25 of €30 → DONE/partial)
 ✓ StateManager strict PMM bookmaker filtering verified (pmk discarded, pin88 accepted)
 ✓ StateManager closed market zero-reset verified (no stale odds kept)
 ✓ ExecutionEngine closed line shot abort verified (0.00 prevents bad bets)
 ✓ TerminalUI closed line bold red 0.00 display verified
+✓ StateManager Total Line selection, cycling and manual overrides verified
+✓ WsFeed soccer subscription verified (fb + fb_ht subscribed for fb_htft events)
+✓ Half Time (HT) 4 markets pre-arming (Asian Total, 1X2, ITB1, ITB2) verified
+✓ MollybetAdapter strict bookie filtering verified (refuses unallowed/raw broker prices)
+✓ WsFeed sticky line hysteresis verified (prevents line jumping between 2.5 and 2.75)
+✓ HT vs FT score isolation and phantom goal prevention verified
+✓ Bookmaker PMM quote priority over generic ticker ticks verified
+✓ Mollybet 4-betslip quota guard (pre-deletion & 403 backoff) verified
+✓ Strict bookmaker (pin88) line closed protection verified (prevents shooting into empty air)
+✓ getArmedBetslip strict context isolation (period & market mode) verified
+✓ WsFeed cumulative spectrum registry and eviction verified
+✓ Stale bookie quote protection against third-party ticker contamination verified
+✓ PMM & Betslip WS-handlers period isolation verified
+✓ Order normalizer logic verified for WON, LOST, VOID, REJECTED_GOAL, IN_PLAY, PENDING
+✓ MollybetAdapter Ice Hockey ("ih") bet_type resolution (tp,reg & tperiod,1..3) and sport payload verified
+✓ WsFeed Ice Hockey event frame parsing and period auto-detection verified
+✓ WsFeed Ice Hockey offers_hcap parsing (nested [null,...] & dual FT/HT dispatch) verified
+✓ StateManager automatic hockey period switch (P1 -> P2) & coupon re-arming verified
 --- ALL ARCHITECTURAL TESTS PASSED SUCCESSFULLY ---
 ```
 
@@ -281,4 +319,4 @@ Detailed rules and system constraints are documented in [ARCHITECTURE_CONSTRAINT
 3. **Strict Bookmaker Filtering (`pin88`)**: Never revert to global `Math.max()` across all bookies. Always check `getAllowedBookies()`. If the target bookie has no offers in betslip, set `currentPrice = 0` and `priceSource = 'CLOSED'`. Never let generic WS feed ticks overwrite a closed target bookie line.
 4. **Never Guess or Resurrect Odds in UI**: In `TerminalUI.formatSlipStatus`, closed slips must show `0.00 (ЗАКРЫТО <TTL>s)`. Generic broker prices must never be displayed as green `OK` for a coupon bound to a strict bookie.
 5. **Score & Period Isolation (FT vs HT)**: Keep `liveScoreFt` and `liveScoreHt` separated. Never propagate FT score changes to HT markets or vice versa.
-6. **Always Run `npm test`**: Verify all 36 architectural tests pass before committing any changes.
+6. **Always Run `npm test`**: Verify all 40 architectural tests pass before committing any changes.

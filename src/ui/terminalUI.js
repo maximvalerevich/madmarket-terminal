@@ -19,6 +19,7 @@ const C = {
   bgYellow: '\x1b[43m',
   bgBlue: '\x1b[44m',
   bgMagenta: '\x1b[45m',
+  bgCyan: '\x1b[46m',
   bgWhite: '\x1b[47m',
   clearLine: '\x1b[2K\r',
   cursorHome: '\x1b[H',
@@ -42,18 +43,29 @@ export class TerminalUI {
    * @param {import('../network/wsFeed.js').WsFeed} options.wsFeed
    * @param {Object} options.config
    */
-  constructor(options) {
-    this.stateManager = options.stateManager;
-    this.executionEngine = options.executionEngine;
-    this.http2Client = options.http2Client;
-    this.wsFeed = options.wsFeed;
-    this.config = options.config;
+  constructor(options, executionEngine = null, http2Client = null, wsFeed = null, config = null) {
+    if (options && (options.stateManager || options.executionEngine || options.config)) {
+      this.stateManager = options.stateManager;
+      this.executionEngine = options.executionEngine;
+      this.http2Client = options.http2Client;
+      this.wsFeed = options.wsFeed;
+      this.config = options.config || {};
+    } else {
+      this.stateManager = options;
+      this.executionEngine = executionEngine;
+      this.http2Client = http2Client;
+      this.wsFeed = wsFeed;
+      this.config = config || {};
+    }
 
     /** @type {'HUD' | 'MENU' | 'COUPONS' | 'LOGS' | 'LINES' | 'INPUT_STAKE'} */
     this.mode = 'HUD';
 
     /** @type {'LIVE' | 'ALL'} */
     this.menuFilterMode = 'LIVE';
+
+    /** @type {'ALL_SPORTS' | 'FB' | 'IH'} */
+    this.menuSportFilter = 'ALL_SPORTS';
 
     this.menuSelectedIndex = 0;
     this.menuMatches = [];
@@ -278,9 +290,15 @@ export class TerminalUI {
     }
 
     // 1. Period Badge, Market Mode Badge, and Match Badge
-    const periodBadge = this.stateManager.activePeriod === 'HT'
-      ? `${C.bold}${C.bgYellow}${C.black} [1-Й ТАЙМ (HT)] ${C.reset}`
-      : `${C.bold}${C.bgGreen}${C.black} [ВЕСЬ МАТЧ (FT)] ${C.reset}`;
+    const isHockey = activeEvent?.sport === 'ih';
+    const hockeyP = this.stateManager.currentHockeyPeriod || activeEvent?.hockeyPeriod || 1;
+    const periodBadge = isHockey
+      ? (this.stateManager.activePeriod === 'HT'
+          ? `${C.bold}${C.bgYellow}${C.black} [IH: P${hockeyP} AUTO] ${C.reset}`
+          : `${C.bold}${C.bgCyan}${C.black} [IH: REG 60m] ${C.reset}`)
+      : (this.stateManager.activePeriod === 'HT'
+          ? `${C.bold}${C.bgYellow}${C.black} [1-Й ТАЙМ (HT)] ${C.reset}`
+          : `${C.bold}${C.bgGreen}${C.black} [ВЕСЬ МАТЧ (FT)] ${C.reset}`);
 
     const modeBadge = this.stateManager.activeMarketMode === 'ITB'
       ? `${C.bold}${C.bgMagenta}${C.white} [ИТБ ХОЗ/ГОС] ${C.reset}`
@@ -288,9 +306,19 @@ export class TerminalUI {
 
     let matchBadge;
     if (activeEvent && activeEvent.homeTeam && activeEvent.homeTeam !== 'Home') {
-      const min = activeEvent.minute ? ` ${activeEvent.minute}` : '';
       const poolTag = armedCount > 1 ? ` (${armedIndex}/${armedCount})` : '';
-      matchBadge = `${C.bold}${C.bgBlue} ARMED${poolTag}: ${activeEvent.homeTeam} ${score.home}-${score.away} ${activeEvent.awayTeam}${min} ${C.reset} ${periodBadge} ${modeBadge}`;
+      if (isHockey) {
+        const ftScore = this.stateManager.liveScoreFt || activeEvent.ftScore || activeEvent.score || score;
+        const pBreakdown = activeEvent.periodScoresStr ? ` (${activeEvent.periodScoresStr})` : '';
+        const cleanMin = activeEvent.minute
+          ? activeEvent.minute.replace(/\s*\([0-9:,\s]+\)\s*$/, '').trim()
+          : '';
+        const minTag = cleanMin ? ` [${cleanMin}]` : '';
+        matchBadge = `${C.bold}${C.bgBlue} ARMED${poolTag}: ${activeEvent.homeTeam} ${ftScore.home}:${ftScore.away}${pBreakdown} ${activeEvent.awayTeam}${minTag} ${C.reset} ${periodBadge} ${modeBadge}`;
+      } else {
+        const min = activeEvent.minute ? ` ${activeEvent.minute}` : '';
+        matchBadge = `${C.bold}${C.bgBlue} ARMED${poolTag}: ${activeEvent.homeTeam} ${score.home}-${score.away} ${activeEvent.awayTeam}${min} ${C.reset} ${periodBadge} ${modeBadge}`;
+      }
     } else {
       matchBadge = `${C.bold}${C.bgRed} NO MATCH SELECTED (Press 'M' for menu) ${C.reset} ${periodBadge} ${modeBadge}`;
     }
@@ -298,7 +326,9 @@ export class TerminalUI {
     // 2. Slip status for active combat period & market mode
     const overSlip = this.stateManager.armedBetslips.OVER;
     const activeLine = this.stateManager.liveOdds.totalLine;
-    const lineLabel = this.stateManager.activePeriod === 'HT' ? `HT_O(${activeLine})` : `O(${activeLine})`;
+    const lineLabel = this.stateManager.activePeriod === 'HT'
+      ? (isHockey ? `P${hockeyP}_O(${activeLine})` : `HT_O(${activeLine})`)
+      : `O(${activeLine})`;
     const overStatus = this.formatSlipStatus(overSlip, this.stateManager.liveOdds.totalOver, 'limit');
 
     let slot2Label = '1';
@@ -309,8 +339,9 @@ export class TerminalUI {
     if (this.stateManager.activeMarketMode === 'ITB') {
       const itb1Slip = this.stateManager.armedBetslips.ITB1;
       const itb2Slip = this.stateManager.armedBetslips.ITB2;
-      const itb1Line = this.stateManager.liveOdds.itb1Line || (this.stateManager.activePeriod === 'HT' ? '0.5' : '1.5');
-      const itb2Line = this.stateManager.liveOdds.itb2Line || (this.stateManager.activePeriod === 'HT' ? '0.5' : '1.5');
+      const defItb = isHockey ? (this.stateManager.activePeriod === 'HT' ? '0.5' : '2.5') : (this.stateManager.activePeriod === 'HT' ? '0.5' : '1.5');
+      const itb1Line = this.stateManager.liveOdds.itb1Line || defItb;
+      const itb2Line = this.stateManager.liveOdds.itb2Line || defItb;
       slot2Label = `ИТБ1(${itb1Line})`;
       slot2Status = this.formatSlipStatus(itb1Slip, this.stateManager.liveOdds.itb1Over, 'limit');
       slot3Label = `ИТБ2(${itb2Line})`;
@@ -608,7 +639,7 @@ export class TerminalUI {
    * Renders the interactive match selection menu.
    */
   renderMenu() {
-    let { list, totalCount, liveCount } = this.stateManager.getSoccerList(this.menuFilterMode);
+    let { list, totalCount, liveCount } = this.stateManager.getSoccerList(this.menuFilterMode, this.menuSportFilter);
     
     if (this.menuSearchQuery) {
       const q = this.menuSearchQuery.toLowerCase();
@@ -620,10 +651,14 @@ export class TerminalUI {
     
     this.menuMatches = list;
 
+    const sportLabel = this.menuSportFilter === 'IH'
+      ? `${C.cyan}ТОЛЬКО ХОККЕЙ [IH]${C.reset}`
+      : (this.menuSportFilter === 'FB' ? `${C.green}ТОЛЬКО ФУТБОЛ [FB]${C.reset}` : 'ВСЕ СПОРТЫ [FB+IH]');
+
     let output = `${C.clearScreen}`;
     output += `${C.bold}${C.blue}=== ВЫБОР LIVE-МАТЧА ДЛЯ ДЕЖУРСТВА ===${C.reset}\n`;
-    output += `В фиде: ${C.bold}${totalCount}${C.reset} | Live: ${C.green}${C.bold}${liveCount}${C.reset} | Режим: ${C.bold}[${this.menuFilterMode === 'LIVE' ? 'ТОЛЬКО LIVE' : 'ВСЕ МАТЧИ'}]${C.reset}\n`;
-    output += `${C.dim}Поиск: просто начните печатать название. ESC — очистить/выйти. CTRL+L — сменить фильтр. ENTER — выбрать.${C.reset}\n`;
+    output += `В фиде: ${C.bold}${totalCount}${C.reset} | Live: ${C.green}${C.bold}${liveCount}${C.reset} | Режим: ${C.bold}[${this.menuFilterMode === 'LIVE' ? 'ТОЛЬКО LIVE' : 'ВСЕ МАТЧИ'}]${C.reset} | Спорт: ${C.bold}[${sportLabel}]${C.reset}\n`;
+    output += `${C.dim}Хоткеи: H/Ctrl+H — Хоккей, F/Ctrl+F — Футбол, L/Ctrl+L — Live, A/Ctrl+A — Все | Поиск: ввод с клавиатуры. ESC — очистить/выйти.${C.reset}\n`;
     output += `> ${C.cyan}${this.menuSearchQuery || '...'} ${C.reset}\n\n`;
 
     const totalMatches = this.menuMatches.length;
@@ -652,6 +687,11 @@ export class TerminalUI {
         const prefix = isSelected ? `${C.bgGreen}${C.bold} > [${i + 1}] ` : `   [${i + 1}] `;
         const resetSuffix = isSelected ? `${C.reset}` : '';
 
+        const isHockey = m.sport === 'ih';
+        const sportBadge = isHockey
+          ? `${C.cyan}${C.bold}[IH]${C.reset}`
+          : `${C.green}${C.bold}[FB]${C.reset}`;
+
         const statusTag = m.isLive
           ? `${C.green}[LIVE ${m.minute || ''}]${C.reset}`
           : `${C.dim}[${m.startTs ? m.startTs.slice(11, 16) + ' UTC' : 'Pre'}]${C.reset}`;
@@ -665,12 +705,15 @@ export class TerminalUI {
           statusBadge = `${C.magenta}[В ПУЛЕ]${C.reset} `;
         }
 
-        const score = `${m.score.home}:${m.score.away}`;
+        const pScoresAddon = (isHockey && m.periodScoresStr && (!m.minute || !m.minute.includes(m.periodScoresStr)))
+          ? ` (${m.periodScoresStr})`
+          : '';
+        const score = `${m.score.home}:${m.score.away}${pScoresAddon}`;
         const oddsInfo = m.odds && (m.odds.totalOver > 0 || m.odds.winHome > 0)
           ? `| 1: ${(m.odds.winHome || 0).toFixed(2)} | 2: ${(m.odds.winAway || 0).toFixed(2)} | O(${m.odds.totalLine}): ${(m.odds.totalOver || 0).toFixed(2)}`
           : '';
 
-        output += `${prefix}${statusTag} ${statusBadge}${m.homeTeam} ${score} ${m.awayTeam} (${m.competition}) ${oddsInfo}${resetSuffix}\n`;
+        output += `${prefix}${sportBadge} ${statusTag} ${statusBadge}${m.homeTeam} ${score} ${m.awayTeam} (${m.competition}) ${oddsInfo}${resetSuffix}\n`;
       }
 
       output += `\n${C.cyan}Показаны матчи ${startIndex + 1}–${endIndex} из ${totalMatches} | Выбран: #${this.menuSelectedIndex + 1}${C.reset}\n`;
@@ -1226,9 +1269,36 @@ export class TerminalUI {
       process.exit(0);
     }
 
-    // Toggle Filter: CTRL+L
-    if (key.name === 'l' && key.ctrl) {
-      this.menuFilterMode = this.menuFilterMode === 'LIVE' ? 'ALL' : 'LIVE';
+    // Sport & Mode Filters: H / Ctrl+H (Hockey), F / Ctrl+F (Football), L / Ctrl+L (Live), A / Ctrl+A (All)
+    if ((key.ctrl && key.name === 'h') || str === 'H') {
+      this.menuSportFilter = this.menuSportFilter === 'IH' ? 'ALL_SPORTS' : 'IH';
+      this.menuSelectedIndex = 0;
+      this.render();
+      return;
+    }
+
+    if ((key.ctrl && key.name === 'f') || str === 'F') {
+      this.menuSportFilter = this.menuSportFilter === 'FB' ? 'ALL_SPORTS' : 'FB';
+      this.menuSelectedIndex = 0;
+      this.render();
+      return;
+    }
+
+    if ((key.ctrl && key.name === 'l') || str === 'L') {
+      if (key.ctrl && key.name === 'l') {
+        this.menuFilterMode = this.menuFilterMode === 'LIVE' ? 'ALL' : 'LIVE';
+      } else {
+        this.menuFilterMode = 'LIVE';
+        this.menuSportFilter = 'ALL_SPORTS';
+      }
+      this.menuSelectedIndex = 0;
+      this.render();
+      return;
+    }
+
+    if ((key.ctrl && key.name === 'a') || str === 'A') {
+      this.menuFilterMode = 'ALL';
+      this.menuSportFilter = 'ALL_SPORTS';
       this.menuSelectedIndex = 0;
       this.render();
       return;
