@@ -2086,6 +2086,87 @@ engine.on('log', (log) => logCaptured.push(log));
   await realCornFeed.destroy();
   console.log('✓ Real fb_corn / fb_corn_ht protocol & async PMM quote resolution for DRAW / CORNERS_ITB verified');
 
+  // 48. Test real Ice Hockey ("ih") market keys (time_ahou,tp,reg, time_tahou,tp,reg,h/a, time_ahou,tperiod,N) & Ctrl+H (\b / 0x08) hotkey
+  const realIhFeed = new WsFeed(testConfig);
+  const ihRealUpdates = [];
+  realIhFeed.on('odds_update', (u) => ihRealUpdates.push(u));
+
+  realIhFeed.handleMessage(JSON.stringify([
+    'offers_event',
+    [2061, 'ih', '2026-10-25,32339,32357'],
+    {
+      'time_ahou,tp,reg': [[6, [['over', 1.338], ['under', 3.05]]], [10, [['over', 2.25], ['under', 1.598]]]],
+      'time_tahou,tp,reg,h': [[2, [['over', 1.333], ['under', 3.12]]], [6, [['over', 2.46], ['under', 1.507]]]],
+      'time_tahou,tp,reg,a': [[2, [['over', 1.502], ['under', 2.48]]], [6, [['over', 3.25], ['under', 1.309]]]],
+      'time_win,tp,reg,wdw': [[null, [['a', 3.29], ['d', 2.679], ['h', 2.34]]]],
+      'time_ahou,tperiod,2': [[6, [['over', 1.943], ['under', 1.877]]]],
+      'time_tahou,tperiod,2,h': [[2, [['over', 1.85], ['under', 1.95]]]],
+      'time_tahou,tperiod,2,a': [[2, [['over', 2.05], ['under', 1.75]]]],
+      'time_win,tperiod,2,ml': [[null, [['a', 2.15], ['h', 1.746]]]]
+    }
+  ]), false);
+
+  assert.equal(ihRealUpdates.length, 2, 'Must emit both FT and HT (P2) updates for real IH offers_event keys');
+  const ihFt = ihRealUpdates.find(u => u.periodType === 'FT');
+  const ihHt = ihRealUpdates.find(u => u.periodType === 'HT');
+  assert.equal(ihFt.odds.totalLine, '2.50', 'time_ahou,tp,reg must resolve FT totalLine 2.50');
+  assert.equal(ihFt.odds.rawTotalLineIndex, 10);
+  assert.equal(ihFt.odds.totalOver, 2.25);
+  assert.equal(ihFt.odds.itb1Line, '0.50', 'time_tahou,tp,reg,h must resolve FT itb1Line 0.50');
+  assert.equal(ihFt.odds.itb1Over, 1.333);
+  assert.equal(ihFt.odds.itb2Line, '0.50', 'time_tahou,tp,reg,a must resolve FT itb2Line 0.50');
+  assert.equal(ihFt.odds.itb2Over, 1.502);
+  assert.equal(ihFt.odds.winHome, 2.34);
+  assert.equal(ihFt.odds.winDraw, 2.679);
+  assert.equal(ihFt.odds.winAway, 3.29);
+
+  assert.equal(ihHt.hockeyPeriod, 2);
+  assert.equal(ihHt.odds.totalLine, '1.50', 'time_ahou,tperiod,2 must resolve P2 totalLine 1.50');
+  assert.equal(ihHt.odds.totalOver, 1.943);
+  assert.equal(ihHt.odds.itb1Over, 1.85);
+  assert.equal(ihHt.odds.itb2Over, 2.05);
+  assert.equal(ihHt.odds.winHome, 1.746);
+  assert.equal(ihHt.odds.winAway, 2.15);
+  await realIhFeed.destroy();
+
+  // Test TerminalUI Ctrl+H (\b / 0x08 parsed by readline as backspace) & Russian layout 'Р' & Left/Right sport filter cycling
+  const smCtrlH = new StateManager(testConfig);
+  const uiCtrlH = new TerminalUI({
+    stateManager: smCtrlH,
+    executionEngine: mockFireEngine,
+    http2Client: { isConnected: true, lastPingRttMs: 5 },
+    wsFeed: { isConnected: true, lastWsRttMs: 8 },
+    config: testConfig
+  });
+  uiCtrlH.render = () => {}; // mute stdout in unit test
+
+  // 1) Pressing Ctrl+H (\b) in HUD opens MENU with IH filter
+  assert.equal(uiCtrlH.mode, 'HUD');
+  uiCtrlH.handleKeypress('\b', { name: 'backspace', sequence: '\b', ctrl: false });
+  assert.equal(uiCtrlH.mode, 'MENU', 'Ctrl+H (\\b) in HUD must open MENU');
+  assert.equal(uiCtrlH.menuSportFilter, 'IH', 'Ctrl+H (\\b) in HUD must filter to IH');
+
+  // 2) Pressing Ctrl+H (\b) in MENU toggles IH <-> ALL_SPORTS
+  uiCtrlH.handleKeypress('\b', { name: 'backspace', sequence: '\b', ctrl: false });
+  assert.equal(uiCtrlH.menuSportFilter, 'ALL_SPORTS', 'Ctrl+H (\\b) in MENU must toggle IH -> ALL_SPORTS');
+  uiCtrlH.handleKeypress('\b', { name: 'backspace', sequence: '\b', ctrl: false });
+  assert.equal(uiCtrlH.menuSportFilter, 'IH', 'Ctrl+H (\\b) in MENU must toggle ALL_SPORTS -> IH');
+
+  // 3) Pressing Russian Shift+H ('Р') in MENU toggles IH <-> ALL_SPORTS
+  uiCtrlH.handleKeypress('Р', { name: undefined, sequence: 'Р', ctrl: false, shift: true });
+  assert.equal(uiCtrlH.menuSportFilter, 'ALL_SPORTS');
+
+  // 4) Pressing Right / Left arrows in MENU cycles ALL_SPORTS -> FB -> IH
+  uiCtrlH.handleKeypress('', { name: 'right' });
+  assert.equal(uiCtrlH.menuSportFilter, 'FB');
+  uiCtrlH.handleKeypress('', { name: 'right' });
+  assert.equal(uiCtrlH.menuSportFilter, 'IH');
+  uiCtrlH.handleKeypress('', { name: 'left' });
+  assert.equal(uiCtrlH.menuSportFilter, 'FB');
+
+  smCtrlH.destroy();
+  console.log('✓ Real Ice Hockey ("ih") market keys & TerminalUI Ctrl+H (\\b) / Russian layout / Arrow sport filters verified');
+
   stickyWsFeed.destroy();
   smHt.destroy();
   testWsFeed.destroy();

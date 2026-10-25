@@ -826,7 +826,7 @@ export class TerminalUI {
     let output = `${C.clearScreen}`;
     output += `${C.bold}${C.blue}=== ВЫБОР LIVE-МАТЧА ДЛЯ ДЕЖУРСТВА ===${C.reset}\n`;
     output += `В фиде: ${C.bold}${totalCount}${C.reset} | Live: ${C.green}${C.bold}${liveCount}${C.reset} | Режим: ${C.bold}[${this.menuFilterMode === 'LIVE' ? 'ТОЛЬКО LIVE' : 'ВСЕ МАТЧИ'}]${C.reset} | Спорт: ${C.bold}[${sportLabel}]${C.reset}\n`;
-    output += `${C.dim}Хоткеи: H/Ctrl+H — Хоккей, F/Ctrl+F — Футбол, L/Ctrl+L — Live, A/Ctrl+A — Все | Поиск: ввод с клавиатуры. ESC — очистить/выйти.${C.reset}\n`;
+    output += `${C.dim}Хоткеи: H/Ctrl+H — Хоккей, F/Ctrl+F — Футбол, ВЛЕВО/ВПРАВО — Спорт, L/Ctrl+L — Live, A/Ctrl+A — Все | Поиск: ввод. ESC — выход.${C.reset}\n`;
     output += `> ${C.cyan}${this.menuSearchQuery || '...'} ${C.reset}\n\n`;
 
     const totalMatches = this.menuMatches.length;
@@ -1070,6 +1070,23 @@ export class TerminalUI {
     // Switch to match selection menu
     if (str === 'm' || str === 'M') {
       this.mode = 'MENU';
+      this.menuSelectedIndex = 0;
+      this.menuInputBuffer = '';
+      this.render();
+      return;
+    }
+
+    // Quick open match selection menu filtered to Ice Hockey (IH): 'h', 'H', or Ctrl+H (\b / 0x08)
+    if (
+      (key.ctrl && (key.name === 'h' || key.name === 'backspace')) ||
+      (key.name === 'backspace' && key.sequence === '\b') ||
+      str === 'h' ||
+      str === 'H' ||
+      str === 'р' ||
+      str === 'Р'
+    ) {
+      this.mode = 'MENU';
+      this.menuSportFilter = 'IH';
       this.menuSelectedIndex = 0;
       this.menuInputBuffer = '';
       this.render();
@@ -1409,21 +1426,35 @@ export class TerminalUI {
     }
 
     // Sport & Mode Filters: H / Ctrl+H (Hockey), F / Ctrl+F (Football), L / Ctrl+L (Live), A / Ctrl+A (All)
-    if ((key.ctrl && key.name === 'h') || str === 'H') {
+    // Note: In ASCII/Windows terminals, Ctrl+H sends 0x08 ('\b'), which Node readline parses as { name: 'backspace', sequence: '\b', ctrl: false }
+    const isCtrlH = (key.ctrl && (key.name === 'h' || key.name === 'backspace'))
+      || (key.name === 'backspace' && key.sequence === '\b' && (!this.menuSearchQuery || this.menuSearchQuery.length === 0));
+
+    if (isCtrlH || str === 'H' || str === 'Р') {
       this.menuSportFilter = this.menuSportFilter === 'IH' ? 'ALL_SPORTS' : 'IH';
       this.menuSelectedIndex = 0;
       this.render();
       return;
     }
 
-    if ((key.ctrl && key.name === 'f') || str === 'F') {
+    if ((key.ctrl && key.name === 'f') || str === 'F' || str === 'А') {
       this.menuSportFilter = this.menuSportFilter === 'FB' ? 'ALL_SPORTS' : 'FB';
       this.menuSelectedIndex = 0;
       this.render();
       return;
     }
 
-    if ((key.ctrl && key.name === 'l') || str === 'L') {
+    if (key.name === 'left' || key.name === 'right') {
+      const sportsOrder = ['ALL_SPORTS', 'FB', 'IH'];
+      const curIdx = sportsOrder.indexOf(this.menuSportFilter);
+      const step = key.name === 'right' ? 1 : -1;
+      this.menuSportFilter = sportsOrder[(curIdx + step + sportsOrder.length) % sportsOrder.length];
+      this.menuSelectedIndex = 0;
+      this.render();
+      return;
+    }
+
+    if ((key.ctrl && key.name === 'l') || str === 'L' || str === 'Д') {
       if (key.ctrl && key.name === 'l') {
         this.menuFilterMode = this.menuFilterMode === 'LIVE' ? 'ALL' : 'LIVE';
       } else {
@@ -1435,7 +1466,7 @@ export class TerminalUI {
       return;
     }
 
-    if ((key.ctrl && key.name === 'a') || str === 'A') {
+    if ((key.ctrl && key.name === 'a') || str === 'A' || str === 'Ф') {
       this.menuFilterMode = 'ALL';
       this.menuSportFilter = 'ALL_SPORTS';
       this.menuSelectedIndex = 0;

@@ -1277,11 +1277,11 @@ export class StateManager extends EventEmitter {
         existing.ftScore = incomingScore;
         updated.ftScore = incomingScore;
         if (this.wsFeed && typeof this.wsFeed.syncEventScore === 'function') {
-          this.wsFeed.syncEventScore(eventId, isHockey ? `${eventId}:ih:FT` : sport, incomingScore);
+          this.wsFeed.syncEventScore(eventId, isHockey ? `${eventId}:ih` : sport, incomingScore);
           if (updated.htScore) {
             this.wsFeed.syncEventScore(
               eventId,
-              isHockey ? `${eventId}:ih:P${updated.hockeyPeriod || 1}` : 'fb_ht',
+              isHockey ? `${eventId}:ih_p${updated.hockeyPeriod || 1}` : 'fb_ht',
               updated.htScore
             );
           }
@@ -2060,6 +2060,12 @@ export class StateManager extends EventEmitter {
         isLive: Boolean(activeEv?.isLive || targetScore.home > 0 || targetScore.away > 0)
       };
 
+      const armedLineIdx = slotKey === 'OVER'
+        ? matchInfo.rawTotalLineIndex
+        : (slotKey === 'ITB1'
+            ? matchInfo.rawItb1LineIndex
+            : (slotKey === 'ITB2' ? matchInfo.rawItb2LineIndex : null));
+
       const result = await this.adapter.preArmBetslip(targetKey, matchInfo);
 
       // Successfully armed: clear backoff
@@ -2070,6 +2076,21 @@ export class StateManager extends EventEmitter {
       slip.betType = result.betType;
       slip.maxStake = result.maxStake || slip.maxStake;
       slip.lastArmedAt = Date.now();
+
+      // Check if an incoming WS offers_hcap frame changed the active line index while HTTP/2 POST was in flight
+      if (!isRetry && armedLineIdx != null && eventId === this.activeEventId) {
+        const latestOdds = isHt ? this.liveOdds.ht : this.liveOdds.ft;
+        const latestLineIdx = slotKey === 'OVER'
+          ? latestOdds.rawTotalLineIndex
+          : (slotKey === 'ITB1'
+              ? latestOdds.rawItb1LineIndex
+              : (slotKey === 'ITB2' ? latestOdds.rawItb2LineIndex : null));
+        if (latestLineIdx != null && latestLineIdx !== armedLineIdx) {
+          logger.info('StateManager', `Line index for ${targetKey} updated (${armedLineIdx} -> ${latestLineIdx}) while betslip was arming. Re-arming immediately!`);
+          slip.isArming = false;
+          return await this.armEventTarget(eventId, targetKey, true, true);
+        }
+      }
 
       // Determine the best available price with priority on allowed bookmaker quotes
       const bookieP = (typeof result.bookiePrice === 'number' && result.bookiePrice > 1.0)

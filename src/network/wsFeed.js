@@ -588,9 +588,9 @@ export class WsFeed extends BaseFeed {
 
     if (isLive) {
       if (isHockey) {
-        this.syncEventScore(eventId, `${eventId}:ih:FT`, score);
+        this.syncEventScore(eventId, `${eventId}:ih`, score);
         if (htScore) {
-          this.syncEventScore(eventId, `${eventId}:ih:P${hockeyPeriod}`, htScore);
+          this.syncEventScore(eventId, `${eventId}:ih_p${hockeyPeriod}`, htScore);
         }
       } else {
         this.syncEventScore(eventId, `${eventId}:${sport}`, score);
@@ -648,9 +648,15 @@ export class WsFeed extends BaseFeed {
     const away = Number(score.away) || 0;
     const total = home + away;
 
-    const scopeKey = String(scopeOrSport).startsWith(`${eventId}:`)
+    let scopeKey = String(scopeOrSport).startsWith(`${eventId}:`)
       ? String(scopeOrSport)
-      : (scopeOrSport === 'ih' ? `${eventId}:ih:FT` : `${eventId}:${scopeOrSport}`);
+      : (scopeOrSport === 'ih' ? `${eventId}:ih` : `${eventId}:${scopeOrSport}`);
+    if (scopeKey === `${eventId}:ih:FT`) {
+      scopeKey = `${eventId}:ih`;
+    } else if (scopeKey.startsWith(`${eventId}:ih:P`)) {
+      const pNum = scopeKey.slice(`${eventId}:ih:P`.length);
+      scopeKey = `${eventId}:ih_p${pNum}`;
+    }
 
     const prev = this.eventScores.get(scopeKey);
     this.eventScores.set(scopeKey, { home, away });
@@ -1081,20 +1087,26 @@ export class WsFeed extends BaseFeed {
       const allKeys = Object.keys(markets);
       const isPeriodKey = (k) => k.includes('tperiod,') || /tp,p[123]\b/.test(k);
 
-      // 1. Resolve Regular Time (FT: tp,reg or short keys, with fallback to tp,all,ml for menu display)
-      const ftWdwKey = ['wdw', 'tp,reg,wdw', 'time_win,tp,reg,wdw'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+      // 1. Resolve Regular Time (FT: tp,reg or short keys, with fallback to tp,all for menu/live display)
+      const ftWdwKey = ['time_win,tp,reg,wdw', 'wdw', 'tp,reg,wdw'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
         || allKeys.find(k => !isPeriodKey(k) && (k === 'wdw' || k.endsWith(',wdw')))
         || ['time_win,tp,all,ml', 'tp,all,ml', 'ml'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
         || allKeys.find(k => !isPeriodKey(k) && k.endsWith(',ml'));
 
-      const ftAhouKey = ['ahou', 'tp,reg,ahou', 'total,tp,reg,ahou'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
-        || allKeys.find(k => !isPeriodKey(k) && !k.includes('tahou') && (k === 'ahou' || k.endsWith(',ahou')));
+      const ftAhouKey = ['time_ahou,tp,reg', 'ahou', 'tp,reg,ahou', 'total,tp,reg,ahou'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && !k.includes('tahou') && k.includes('ahou') && k.includes('tp,reg'))
+        || ['time_ahou,tp,all'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && !k.includes('tahou') && (k === 'ahou' || k.endsWith(',ahou') || k.includes('ahou')));
 
-      const ftTahouHKey = ['tahou,h', 'tahou_h', 'tp,reg,tahou,h', 'tp,reg,tahou_h'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
-        || allKeys.find(k => !isPeriodKey(k) && (k.endsWith('tahou,h') || k.endsWith('tahou_h')));
+      const ftTahouHKey = ['time_tahou,tp,reg,h', 'tahou,h', 'tahou_h', 'tp,reg,tahou,h', 'tp,reg,tahou_h'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && k.includes('tahou') && k.includes('tp,reg') && (k.endsWith(',h') || k.endsWith('_h')))
+        || ['time_tahou,tp,all,h'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && k.includes('tahou') && (k.endsWith(',h') || k.endsWith('_h') || k.endsWith('tahou,h') || k.endsWith('tahou_h')));
 
-      const ftTahouAKey = ['tahou,a', 'tahou_a', 'tp,reg,tahou,a', 'tp,reg,tahou_a'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
-        || allKeys.find(k => !isPeriodKey(k) && (k.endsWith('tahou,a') || k.endsWith('tahou_a')));
+      const ftTahouAKey = ['time_tahou,tp,reg,a', 'tahou,a', 'tahou_a', 'tp,reg,tahou,a', 'tp,reg,tahou_a'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && k.includes('tahou') && k.includes('tp,reg') && (k.endsWith(',a') || k.endsWith('_a')))
+        || ['time_tahou,tp,all,a'].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => !isPeriodKey(k) && k.includes('tahou') && (k.endsWith(',a') || k.endsWith('_a') || k.endsWith('tahou,a') || k.endsWith('tahou_a')));
 
       const hasAnyFt = Boolean(ftWdwKey || ftAhouKey || ftTahouHKey || ftTahouAKey);
 
@@ -1112,17 +1124,19 @@ export class WsFeed extends BaseFeed {
       }
 
       const matchPeriodN = (k, p) => k.includes(`tperiod,${p}`) || k.includes(`tp,p${p}`);
-      const htWdwKey = [`tperiod,${activePeriod},wdw`, `tp,p${activePeriod},wdw`, `time_win,tperiod,${activePeriod},wdw`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
-        || allKeys.find(k => matchPeriodN(k, activePeriod) && k.endsWith('wdw'));
+      const htWdwKey = [`time_win,tperiod,${activePeriod},wdw`, `tperiod,${activePeriod},wdw`, `tp,p${activePeriod},wdw`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && k.endsWith('wdw'))
+        || [`time_win,tperiod,${activePeriod},ml`, `tperiod,${activePeriod},ml`, `tp,p${activePeriod},ml`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && k.endsWith('ml'));
 
-      const htAhouKey = [`tperiod,${activePeriod},ahou`, `tp,p${activePeriod},ahou`, `total,tperiod,${activePeriod},ahou`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
-        || allKeys.find(k => matchPeriodN(k, activePeriod) && !k.includes('tahou') && k.endsWith('ahou'));
+      const htAhouKey = [`time_ahou,tperiod,${activePeriod}`, `tperiod,${activePeriod},ahou`, `tp,p${activePeriod},ahou`, `total,tperiod,${activePeriod},ahou`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && !k.includes('tahou') && (k.endsWith('ahou') || k.includes('ahou')));
 
-      const htTahouHKey = [`tperiod,${activePeriod},tahou,h`, `tperiod,${activePeriod},tahou_h`, `tp,p${activePeriod},tahou,h`, `tp,p${activePeriod},tahou_h`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
-        || allKeys.find(k => matchPeriodN(k, activePeriod) && (k.endsWith('tahou,h') || k.endsWith('tahou_h')));
+      const htTahouHKey = [`time_tahou,tperiod,${activePeriod},h`, `tperiod,${activePeriod},tahou,h`, `tperiod,${activePeriod},tahou_h`, `tp,p${activePeriod},tahou,h`, `tp,p${activePeriod},tahou_h`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && k.includes('tahou') && (k.endsWith(',h') || k.endsWith('_h') || k.endsWith('tahou,h') || k.endsWith('tahou_h')));
 
-      const htTahouAKey = [`tperiod,${activePeriod},tahou,a`, `tperiod,${activePeriod},tahou_a`, `tp,p${activePeriod},tahou,a`, `tp,p${activePeriod},tahou_a`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
-        || allKeys.find(k => matchPeriodN(k, activePeriod) && (k.endsWith('tahou,a') || k.endsWith('tahou_a')));
+      const htTahouAKey = [`time_tahou,tperiod,${activePeriod},a`, `tperiod,${activePeriod},tahou,a`, `tperiod,${activePeriod},tahou_a`, `tp,p${activePeriod},tahou,a`, `tp,p${activePeriod},tahou_a`].find(k => Object.prototype.hasOwnProperty.call(markets, k))
+        || allKeys.find(k => matchPeriodN(k, activePeriod) && k.includes('tahou') && (k.endsWith(',a') || k.endsWith('_a') || k.endsWith('tahou,a') || k.endsWith('tahou_a')));
 
       const hasAnyHt = Boolean(htWdwKey || htAhouKey || htTahouHKey || htTahouAKey);
 
