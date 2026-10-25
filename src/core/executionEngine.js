@@ -80,8 +80,8 @@ export class ExecutionEngine extends EventEmitter {
       return { success: false, reason: 'NO_ACTIVE_EVENT' };
     }
 
-    // 3. Extract pre-armed betslip
-    const armed = this.stateManager.getArmedBetslip(targetKey);
+    // 3. Extract pre-armed betslip (auto-arming on-demand direct targets: DRAW, CORNERS_ITB1, CORNERS_ITB2)
+    let armed = this.stateManager.getArmedBetslip(targetKey);
     if (!armed) {
       const msg = `[ABORT] Купон для ${targetKey} недоступен в текущем контексте (период: ${this.stateManager.activePeriod}, режим: ${this.stateManager.activeMarketMode})!`;
       logger.error('ExecutionEngine', msg);
@@ -89,7 +89,15 @@ export class ExecutionEngine extends EventEmitter {
       this.emit('execution_result', { status: 'ABORT', targetKey, message: msg, timestamp: new Date().toLocaleTimeString('ru-RU', { hour12: false }) });
       return { success: false, reason: 'INVALID_CONTEXT' };
     }
-    if (!armed.betslipId) {
+
+    const slotKey = String(targetKey || '').replace(/^HT_/, '');
+    const isOnDemandTarget = slotKey === 'DRAW' || slotKey === 'CORNERS_ITB1' || slotKey === 'CORNERS_ITB2';
+    if (isOnDemandTarget && (!armed.betslipId || (armed.expiryTs > 0 && Date.now() >= armed.expiryTs))) {
+      await this.stateManager.armTarget(targetKey, true);
+      armed = this.stateManager.getArmedBetslip(targetKey);
+    }
+
+    if (!armed || !armed.betslipId) {
       const msg = `[ABORT] Betslip for ${targetKey} is NOT armed! (Waiting for pre-warm)`;
       logger.error('ExecutionEngine', msg);
       this.emit('log', { level: 'error', message: msg });

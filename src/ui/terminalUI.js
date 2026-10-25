@@ -461,12 +461,13 @@ export class TerminalUI {
     if (this.stateManager.activeMarketMode === 'MAIN') {
       const itb1Str = odds.itb1Over > 1.0 ? odds.itb1Over.toFixed(2) : `${C.bold}${C.red}0.00${C.reset}`;
       const itb2Str = odds.itb2Over > 1.0 ? odds.itb2Over.toFixed(2) : `${C.bold}${C.red}0.00${C.reset}`;
-      altPeriodLine = `${C.dim}Линия ИТБ (${p}):${C.reset} ИТБ1(${odds.itb1Line || '1.5'}): ${itb1Str} | ИТБ2(${odds.itb2Line || '1.5'}): ${itb2Str}  ${C.yellow}['I' — режим ИТБ, '6'/'7' — прямой удар ИТБ1/2, 'T' — тайм]${C.reset}`;
+      const drawStr = odds.winDraw > 1.0 ? odds.winDraw.toFixed(2) : `${C.bold}${C.red}0.00${C.reset}`;
+      altPeriodLine = `${C.dim}Линия ИТБ / X (${p}):${C.reset} X(Ничья): ${drawStr} | ИТБ1(${odds.itb1Line || '1.5'}): ${itb1Str} | ИТБ2(${odds.itb2Line || '1.5'}): ${itb2Str}  ${C.yellow}['3' — Ничья, '6'/'7' — ИТБ угловых, 'I' — ИТБ, 'T' — тайм]${C.reset}`;
     } else {
       const hStr = odds.winHome > 1.0 ? odds.winHome.toFixed(2) : `${C.bold}${C.red}0.00${C.reset}`;
       const dStr = odds.winDraw > 1.0 ? odds.winDraw.toFixed(2) : `${C.bold}${C.red}0.00${C.reset}`;
       const aStr = odds.winAway > 1.0 ? odds.winAway.toFixed(2) : `${C.bold}${C.red}0.00${C.reset}`;
-      altPeriodLine = `${C.dim}Линия 1X2 (${p}):${C.reset} 1: ${hStr} | X: ${dStr} | 2: ${aStr}  ${C.yellow}['I' — режим 1X2, 'T' — тайм]${C.reset}`;
+      altPeriodLine = `${C.dim}Линия 1X2 (${p}):${C.reset} 1: ${hStr} | X: ${dStr} | 2: ${aStr}  ${C.yellow}['3' — Ничья, '6'/'7' — ИТБ угловых, 'I' — 1X2, 'T' — тайм]${C.reset}`;
     }
 
     const cornersLine = this.formatCornersHudLine();
@@ -510,7 +511,7 @@ export class TerminalUI {
       }
     } else {
       const modeKeyGuide = this.stateManager.activeMarketMode === 'ITB' ? '1=ИТБ1, 2=ИТБ2' : '1=П1, 2=П2';
-      orderLine = `${C.dim}[ОРДЕР]: В боевом дежурстве. SPACE=Тотал, ${modeKeyGuide}, 6/7=Прямой удар ИТБ1/ИТБ2, 3/4/5=Удар HT.${C.reset}`;
+      orderLine = `${C.dim}[ОРДЕР]: В боевом дежурстве. SPACE=Тотал, ${modeKeyGuide}, 3=Ничья, 6/7=ИТБ угловых.${C.reset}`;
     }
 
     // 8. Line 4: System Event Log
@@ -579,7 +580,7 @@ export class TerminalUI {
     // 10. Line 5: Hotkeys Guide
     const mMode = this.stateManager.activeMarketMode;
     const pLabel = this.stateManager.activePeriod;
-    const hotkeysLine = `${C.cyan}[SPACE=ТОТАЛ, 1/2=УДАР, 6/7=ИТБ, L=ЛИНИИ, </>=СМЕНА ТБ, I=РЕЖИМ, T=ТАЙМ, 3/4/5=HT, X/Shift+D=СБРОС КУПОНОВ, B=ИСТОРИЯ, M=МЕНЮ, TAB=ЛОГИ, Q=ВЫХОД]${C.reset}`;
+    const hotkeysLine = `${C.cyan}[SPACE=ТОТАЛ, 1/2=УДАР, 3=НИЧЬЯ, 6/7=ИТБ УГЛ, L=ЛИНИИ, </>=СМЕНА ТБ, I=РЕЖИМ, T=ТАЙМ, X/Shift+D=СБРОС КУПОНОВ, B=ИСТОРИЯ, M=МЕНЮ, TAB=ЛОГИ, Q=ВЫХОД]${C.reset}`;
 
     const cornersHudOutput = cornersLine ? `${C.clearLine}${cornersLine}\n` : `${C.clearLine}\n`;
 
@@ -1115,76 +1116,26 @@ export class TerminalUI {
       return;
     }
 
-    // Direct Individual Over triggers:
-    // '6' -> ITB1 (Team 1 Over)
+    // Direct Corners Individual Over triggers:
+    // '6' -> CORNERS_ITB1 / HT_CORNERS_ITB1 (Team 1 Corners Over)
     if (str === '6') {
-      if (this.stateManager.activeMarketMode !== 'ITB') {
-        this.stateManager.setMarketMode('ITB').then(() => {
-          this.setLog('warn', 'Режим рынков переключен на ИТБ. Купоны взводятся, нажмите 6 для удара.');
-          this.render();
-        }).catch(() => {});
-      } else {
-        const target = this.stateManager.activePeriod === 'HT' ? 'HT_ITB1' : 'ITB1';
-        this.executionEngine.fire(target).catch(() => {});
-      }
+      const target = this.stateManager.activePeriod === 'HT' ? 'HT_CORNERS_ITB1' : 'CORNERS_ITB1';
+      this.executionEngine.fire(target).catch(() => {});
       return;
     }
 
-    // '7' -> ITB2 (Team 2 Over)
+    // '7' -> CORNERS_ITB2 / HT_CORNERS_ITB2 (Team 2 Corners Over)
     if (str === '7') {
-      if (this.stateManager.activeMarketMode !== 'ITB') {
-        this.stateManager.setMarketMode('ITB').then(() => {
-          this.setLog('warn', 'Режим рынков переключен на ИТБ. Купоны взводятся, нажмите 7 для удара.');
-          this.render();
-        }).catch(() => {});
-      } else {
-        const target = this.stateManager.activePeriod === 'HT' ? 'HT_ITB2' : 'ITB2';
-        this.executionEngine.fire(target).catch(() => {});
-      }
+      const target = this.stateManager.activePeriod === 'HT' ? 'HT_CORNERS_ITB2' : 'CORNERS_ITB2';
+      this.executionEngine.fire(target).catch(() => {});
       return;
     }
 
-    // Direct 1st Half triggers:
-    // '3' -> HT_OVER
+    // Direct Draw trigger:
+    // '3' -> DRAW / HT_DRAW (Ничья X)
     if (str === '3') {
-      if (this.stateManager.activePeriod !== 'HT') {
-        this.stateManager.setPeriod('HT').then(() => {
-          this.setLog('warn', 'Период переключен на 1-й тайм (HT). Купоны взводятся, нажмите 3 для удара.');
-          this.render();
-        }).catch(() => {});
-      } else {
-        this.executionEngine.fire('HT_OVER').catch(() => {});
-      }
-      return;
-    }
-
-    // '4' -> HT_HOME (MAIN) or HT_ITB1 (ITB)
-    if (str === '4') {
-      const isItb = this.stateManager.activeMarketMode === 'ITB';
-      const target = isItb ? 'HT_ITB1' : 'HT_HOME';
-      if (this.stateManager.activePeriod !== 'HT') {
-        this.stateManager.setPeriod('HT').then(() => {
-          this.setLog('warn', `Период переключен на 1-й тайм (HT). Купоны взводятся, нажмите 4 для удара (${target}).`);
-          this.render();
-        }).catch(() => {});
-      } else {
-        this.executionEngine.fire(target).catch(() => {});
-      }
-      return;
-    }
-
-    // '5' -> HT_AWAY (MAIN) or HT_ITB2 (ITB)
-    if (str === '5') {
-      const isItb = this.stateManager.activeMarketMode === 'ITB';
-      const target = isItb ? 'HT_ITB2' : 'HT_AWAY';
-      if (this.stateManager.activePeriod !== 'HT') {
-        this.stateManager.setPeriod('HT').then(() => {
-          this.setLog('warn', `Период переключен на 1-й тайм (HT). Купоны взводятся, нажмите 5 для удара (${target}).`);
-          this.render();
-        }).catch(() => {});
-      } else {
-        this.executionEngine.fire(target).catch(() => {});
-      }
+      const target = this.stateManager.activePeriod === 'HT' ? 'HT_DRAW' : 'DRAW';
+      this.executionEngine.fire(target).catch(() => {});
       return;
     }
 

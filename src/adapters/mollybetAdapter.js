@@ -119,6 +119,8 @@ export class MollybetAdapter extends BaseAdapter {
         }
         case 'HOME':
           return `for,${prefix},wdw,h`;
+        case 'DRAW':
+          return `for,${prefix},wdw,d`;
         case 'AWAY':
           return `for,${prefix},wdw,a`;
         case 'ITB1': {
@@ -171,6 +173,9 @@ export class MollybetAdapter extends BaseAdapter {
       case 'HOME':
       case 'HT_HOME':
         return 'for,h';
+      case 'DRAW':
+      case 'HT_DRAW':
+        return 'for,d';
       case 'AWAY':
       case 'HT_AWAY':
         return 'for,a';
@@ -201,6 +206,40 @@ export class MollybetAdapter extends BaseAdapter {
         return isLive
           ? `for,ir,${h},${a},tahover,a,${lineIndex}`
           : `for,tahover,a,${lineIndex}`;
+      }
+      case 'CORNERS_ITB1':
+      case 'HT_CORNERS_ITB1': {
+        let lineIndex;
+        if (typeof matchInfo.rawCornersItb1LineIndex === 'number' && matchInfo.rawCornersItb1LineIndex > 0) {
+          lineIndex = matchInfo.rawCornersItb1LineIndex;
+        } else if (typeof matchInfo.rawItb1LineIndex === 'number' && matchInfo.rawItb1LineIndex > 0 && matchInfo.isCornersEvent) {
+          lineIndex = matchInfo.rawItb1LineIndex;
+        } else {
+          const defLine = targetKey === 'HT_CORNERS_ITB1' ? '1.5' : '4.5';
+          const val = parseFloat(matchInfo.cornersItb1Line || (matchInfo.isCornersEvent ? matchInfo.itb1Line : '') || defLine);
+          lineIndex = Math.round((Number.isNaN(val) ? parseFloat(defLine) : val) * 4);
+        }
+        const marketType = matchInfo.isCornersEvent ? 'tahover,h' : 'ctahover,h';
+        return isLive
+          ? `for,ir,${h},${a},${marketType},${lineIndex}`
+          : `for,${marketType},${lineIndex}`;
+      }
+      case 'CORNERS_ITB2':
+      case 'HT_CORNERS_ITB2': {
+        let lineIndex;
+        if (typeof matchInfo.rawCornersItb2LineIndex === 'number' && matchInfo.rawCornersItb2LineIndex > 0) {
+          lineIndex = matchInfo.rawCornersItb2LineIndex;
+        } else if (typeof matchInfo.rawItb2LineIndex === 'number' && matchInfo.rawItb2LineIndex > 0 && matchInfo.isCornersEvent) {
+          lineIndex = matchInfo.rawItb2LineIndex;
+        } else {
+          const defLine = targetKey === 'HT_CORNERS_ITB2' ? '1.5' : '4.5';
+          const val = parseFloat(matchInfo.cornersItb2Line || (matchInfo.isCornersEvent ? matchInfo.itb2Line : '') || defLine);
+          lineIndex = Math.round((Number.isNaN(val) ? parseFloat(defLine) : val) * 4);
+        }
+        const marketType = matchInfo.isCornersEvent ? 'tahover,a' : 'ctahover,a';
+        return isLive
+          ? `for,ir,${h},${a},${marketType},${lineIndex}`
+          : `for,${marketType},${lineIndex}`;
       }
       default:
         throw new Error(`Unsupported targetKey: ${targetKey}`);

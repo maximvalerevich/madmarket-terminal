@@ -472,6 +472,48 @@ export class StateManager extends EventEmitter {
         isArming: false,
         lastArmedAt: 0,
         error: null
+      },
+      DRAW: {
+        targetKey: isHt ? 'HT_DRAW' : 'DRAW',
+        betslipId: null,
+        betType: null,
+        currentPrice: 0,
+        bookiePrice: null,
+        bookiePriceTs: 0,
+        priceSource: 'NONE',
+        expiryTs: 0,
+        maxStake: null,
+        isArming: false,
+        lastArmedAt: 0,
+        error: null
+      },
+      CORNERS_ITB1: {
+        targetKey: isHt ? 'HT_CORNERS_ITB1' : 'CORNERS_ITB1',
+        betslipId: null,
+        betType: null,
+        currentPrice: 0,
+        bookiePrice: null,
+        bookiePriceTs: 0,
+        priceSource: 'NONE',
+        expiryTs: 0,
+        maxStake: null,
+        isArming: false,
+        lastArmedAt: 0,
+        error: null
+      },
+      CORNERS_ITB2: {
+        targetKey: isHt ? 'HT_CORNERS_ITB2' : 'CORNERS_ITB2',
+        betslipId: null,
+        betType: null,
+        currentPrice: 0,
+        bookiePrice: null,
+        bookiePriceTs: 0,
+        priceSource: 'NONE',
+        expiryTs: 0,
+        maxStake: null,
+        isArming: false,
+        lastArmedAt: 0,
+        error: null
       }
     };
   }
@@ -1613,6 +1655,9 @@ export class StateManager extends EventEmitter {
       case 'HOME':
       case 'HT_HOME':
         return Number(odds.winHome) || 0;
+      case 'DRAW':
+      case 'HT_DRAW':
+        return Number(odds.winDraw) || 0;
       case 'AWAY':
       case 'HT_AWAY':
         return Number(odds.winAway) || 0;
@@ -1622,6 +1667,12 @@ export class StateManager extends EventEmitter {
       case 'ITB2':
       case 'HT_ITB2':
         return Number(odds.itb2Over) || 0;
+      case 'CORNERS_ITB1':
+      case 'HT_CORNERS_ITB1':
+        return Number(odds.cornersItb1Over) || 0;
+      case 'CORNERS_ITB2':
+      case 'HT_CORNERS_ITB2':
+        return Number(odds.cornersItb2Over) || 0;
       default:
         return 0;
     }
@@ -1630,7 +1681,7 @@ export class StateManager extends EventEmitter {
   /**
    * Retrieves the pre-armed betslip for instant execution.
    * Validates period and market mode context to prevent cross-period / cross-mode misfires.
-   * @param {'OVER' | 'HOME' | 'AWAY' | 'ITB1' | 'ITB2' | 'HT_OVER' | 'HT_HOME' | 'HT_AWAY' | 'HT_ITB1' | 'HT_ITB2'} targetKey
+   * @param {'OVER' | 'HOME' | 'DRAW' | 'AWAY' | 'ITB1' | 'ITB2' | 'CORNERS_ITB1' | 'CORNERS_ITB2' | 'HT_OVER' | 'HT_HOME' | 'HT_DRAW' | 'HT_AWAY' | 'HT_ITB1' | 'HT_ITB2' | 'HT_CORNERS_ITB1' | 'HT_CORNERS_ITB2'} targetKey
    * @returns {Object | null}
    */
   getArmedBetslip(targetKey) {
@@ -1658,9 +1709,12 @@ export class StateManager extends EventEmitter {
 
     if (slotKey === 'OVER') return this.armedBetslips.OVER;
     if (slotKey === 'HOME') return this.armedBetslips.HOME;
+    if (slotKey === 'DRAW') return this.armedBetslips.DRAW;
     if (slotKey === 'AWAY') return this.armedBetslips.AWAY;
     if (slotKey === 'ITB1') return this.armedBetslips.ITB1;
     if (slotKey === 'ITB2') return this.armedBetslips.ITB2;
+    if (slotKey === 'CORNERS_ITB1') return this.armedBetslips.CORNERS_ITB1;
+    if (slotKey === 'CORNERS_ITB2') return this.armedBetslips.CORNERS_ITB2;
     return this.armedBetslips[targetKey] || null;
   }
 
@@ -1689,16 +1743,23 @@ export class StateManager extends EventEmitter {
   }
 
   /**
-   * Invalidates a betslip after firing to force immediate re-arm.
-   * @param {'OVER' | 'HOME' | 'AWAY' | 'HT_OVER' | 'HT_HOME' | 'HT_AWAY'} targetKey
+   * Invalidates a betslip after firing to force immediate re-arm (or release on-demand slot).
+   * @param {string} targetKey
    */
   invalidateBetslip(targetKey) {
     const slip = this.getArmedBetslip(targetKey);
+    const slotKey = String(targetKey || '').replace(/^HT_/, '');
+    const isOnDemandSlot = slotKey === 'DRAW' || slotKey === 'CORNERS_ITB1' || slotKey === 'CORNERS_ITB2';
     if (slip) {
+      if (isOnDemandSlot && slip.betslipId && this.adapter && typeof this.adapter.deleteBetslip === 'function') {
+        this.adapter.deleteBetslip(slip.betslipId).catch(() => {});
+      }
       slip.betslipId = null;
       slip.expiryTs = 0;
     }
-    this.armTarget(slip?.targetKey || targetKey, true).catch(() => {});
+    if (!isOnDemandSlot) {
+      this.armTarget(slip?.targetKey || targetKey, true).catch(() => {});
+    }
   }
 
   /**
@@ -1767,23 +1828,39 @@ export class StateManager extends EventEmitter {
       const defTotalIdx = isHockey ? (isHt ? 6 : 22) : (isHt ? 2 : 10);
       const defItbLine = isHockey ? (isHt ? '0.5' : '2.5') : (isHt ? '0.5' : '1.5');
       const defItbIdx = isHockey ? (isHt ? 2 : 10) : (isHt ? 2 : 6);
+      const defCornersItbLine = isHt ? '1.5' : '4.5';
+      const defCornersItbIdx = isHt ? 6 : 18;
       const hockeyPeriod = (eventId === this.activeEventId)
         ? (this.currentHockeyPeriod || activeEv?.hockeyPeriod || 1)
         : (activeEv?.hockeyPeriod || 1);
 
+      const isCornersSlot = slotKey === 'CORNERS_ITB1' || slotKey === 'CORNERS_ITB2';
+      const cornersEv = (isCornersSlot && activeEv?.cornersEventId)
+        ? this.eventsMap.get(activeEv.cornersEventId)
+        : null;
+      const targetEvId = cornersEv ? cornersEv.eventId : eventId;
+      const targetScore = cornersEv
+        ? (isHt ? (cornersEv.htScore || cornersEv.score || { home: 0, away: 0 }) : (cornersEv.ftScore || cornersEv.score || { home: 0, away: 0 }))
+        : score;
+
       const matchInfo = {
-        eventId,
-        liveScore: score,
+        eventId: targetEvId,
+        liveScore: targetScore,
         totalLine: odds.totalLine || defTotalLine,
         rawTotalLineIndex: odds.rawTotalLineIndex ?? defTotalIdx,
         itb1Line: odds.itb1Line || defItbLine,
         rawItb1LineIndex: odds.rawItb1LineIndex ?? defItbIdx,
         itb2Line: odds.itb2Line || defItbLine,
         rawItb2LineIndex: odds.rawItb2LineIndex ?? defItbIdx,
+        cornersItb1Line: odds.cornersItb1Line || defCornersItbLine,
+        rawCornersItb1LineIndex: odds.rawCornersItb1LineIndex ?? defCornersItbIdx,
+        cornersItb2Line: odds.cornersItb2Line || defCornersItbLine,
+        rawCornersItb2LineIndex: odds.rawCornersItb2LineIndex ?? defCornersItbIdx,
+        isCornersEvent: Boolean(cornersEv || activeEv?.isCorners),
         period: isHt ? 'HT' : 'FT',
         sport: isHockey ? 'ih' : (isHt ? 'fb_ht' : 'fb'),
         hockeyPeriod: isHockey ? hockeyPeriod : undefined,
-        isLive: Boolean(activeEv?.isLive || score.home > 0 || score.away > 0)
+        isLive: Boolean(activeEv?.isLive || targetScore.home > 0 || targetScore.away > 0)
       };
 
       const result = await this.adapter.preArmBetslip(targetKey, matchInfo);
@@ -1813,9 +1890,12 @@ export class StateManager extends EventEmitter {
           const pOdds = isHt ? this.liveOdds.ht : this.liveOdds.ft;
           if ((targetKey === 'OVER' || targetKey === 'HT_OVER') && pOdds.totalOver <= 1.0) pOdds.totalOver = bookieP;
           if ((targetKey === 'HOME' || targetKey === 'HT_HOME') && pOdds.winHome <= 1.0) pOdds.winHome = bookieP;
+          if ((targetKey === 'DRAW' || targetKey === 'HT_DRAW') && pOdds.winDraw <= 1.0) pOdds.winDraw = bookieP;
           if ((targetKey === 'AWAY' || targetKey === 'HT_AWAY') && pOdds.winAway <= 1.0) pOdds.winAway = bookieP;
           if ((targetKey === 'ITB1' || targetKey === 'HT_ITB1') && pOdds.itb1Over <= 1.0) pOdds.itb1Over = bookieP;
           if ((targetKey === 'ITB2' || targetKey === 'HT_ITB2') && pOdds.itb2Over <= 1.0) pOdds.itb2Over = bookieP;
+          if ((targetKey === 'CORNERS_ITB1' || targetKey === 'HT_CORNERS_ITB1') && pOdds.cornersItb1Over <= 1.0) pOdds.cornersItb1Over = bookieP;
+          if ((targetKey === 'CORNERS_ITB2' || targetKey === 'HT_CORNERS_ITB2') && pOdds.cornersItb2Over <= 1.0) pOdds.cornersItb2Over = bookieP;
         }
       } else {
         const allowed = this.getAllowedBookies();

@@ -1900,6 +1900,63 @@ engine.on('log', (log) => logCaptured.push(log));
   await cornFeed.destroy();
   console.log('✓ Team Corner ITB lines (FT Общий & HT 1-й тайм) parsing, companion event linking & HUD/Lines UI verified');
 
+  // 46. Test HUD hotkeys (3 = DRAW, 6/7 = CORNERS_ITB1/2, 4/5 removed) & MollybetAdapter DRAW / CORNERS_ITB resolution
+  assert.equal(adapter.resolveBetType('DRAW', {}), 'for,d');
+  assert.equal(adapter.resolveBetType('HT_DRAW', {}), 'for,d');
+  assert.equal(adapter.resolveBetType('DRAW', { sport: 'ih', period: 'FT' }), 'for,tp,reg,wdw,d');
+  assert.equal(adapter.resolveBetType('HT_DRAW', { sport: 'ih', period: 'HT', hockeyPeriod: 2 }), 'for,tperiod,2,wdw,d');
+  assert.equal(
+    adapter.resolveBetType('CORNERS_ITB1', { cornersItb1Line: '4.5', isLive: true, liveScore: { home: 0, away: 0 } }),
+    'for,ir,0,0,ctahover,h,18'
+  );
+  assert.equal(
+    adapter.resolveBetType('CORNERS_ITB2', { cornersItb2Line: '3.5', isCornersEvent: true, isLive: true, liveScore: { home: 2, away: 1 } }),
+    'for,ir,2,1,tahover,a,14'
+  );
+
+  assert(
+    capturedCornHud.includes('[SPACE=ТОТАЛ, 1/2=УДАР, 3=НИЧЬЯ, 6/7=ИТБ УГЛ, L=ЛИНИИ, </>=СМЕНА ТБ, I=РЕЖИМ, T=ТАЙМ, X/Shift+D=СБРОС КУПОНОВ, B=ИСТОРИЯ, M=МЕНЮ, TAB=ЛОГИ, Q=ВЫХОД]'),
+    'HUD hotkeys line must match updated layout (3=НИЧЬЯ, 6/7=ИТБ УГЛ, no 3/4/5=HT)'
+  );
+
+  const firedTargets = [];
+  const mockFireEngine = {
+    on: () => {},
+    fire: async (target) => {
+      firedTargets.push(target);
+      return { success: true };
+    }
+  };
+  const smKeys = new StateManager(testConfig);
+  const uiKeys = new TerminalUI({
+    stateManager: smKeys,
+    executionEngine: mockFireEngine,
+    http2Client: { isConnected: true, lastPingRttMs: 5 },
+    wsFeed: { isConnected: true, lastWsRttMs: 8 },
+    config: testConfig
+  });
+
+  // In FT period: 3 -> DRAW, 6 -> CORNERS_ITB1, 7 -> CORNERS_ITB2, 4 & 5 -> ignored
+  uiKeys.handleHudKeypress('3', { name: '3' });
+  uiKeys.handleHudKeypress('6', { name: '6' });
+  uiKeys.handleHudKeypress('7', { name: '7' });
+  uiKeys.handleHudKeypress('4', { name: '4' });
+  uiKeys.handleHudKeypress('5', { name: '5' });
+  assert.deepEqual(firedTargets, ['DRAW', 'CORNERS_ITB1', 'CORNERS_ITB2'], 'In FT: 3=DRAW, 6=CORNERS_ITB1, 7=CORNERS_ITB2, 4/5 must be ignored');
+
+  // In HT period: 3 -> HT_DRAW, 6 -> HT_CORNERS_ITB1, 7 -> HT_CORNERS_ITB2, 4 & 5 -> ignored
+  firedTargets.length = 0;
+  smKeys.activePeriod = 'HT';
+  uiKeys.handleHudKeypress('3', { name: '3' });
+  uiKeys.handleHudKeypress('6', { name: '6' });
+  uiKeys.handleHudKeypress('7', { name: '7' });
+  uiKeys.handleHudKeypress('4', { name: '4' });
+  uiKeys.handleHudKeypress('5', { name: '5' });
+  assert.deepEqual(firedTargets, ['HT_DRAW', 'HT_CORNERS_ITB1', 'HT_CORNERS_ITB2'], 'In HT: 3=HT_DRAW, 6=HT_CORNERS_ITB1, 7=HT_CORNERS_ITB2, 4/5 must be ignored');
+
+  smKeys.destroy();
+  console.log('✓ HUD hotkeys (3=НИЧЬЯ, 6/7=ИТБ УГЛ, 4/5 removed) & DRAW / CORNERS_ITB execution verified');
+
   stickyWsFeed.destroy();
   smHt.destroy();
   testWsFeed.destroy();
