@@ -162,7 +162,13 @@ export class WsFeed extends BaseFeed {
         this.emit('connected');
 
         if (this.watchedEvent) {
-          this.subscribeToEvent(this.watchedEvent.competitionId, this.watchedEvent.sport, this.watchedEvent.eventId);
+          this.subscribeToEvent(
+            this.watchedEvent.competitionId,
+            this.watchedEvent.sport,
+            this.watchedEvent.eventId,
+            this.watchedEvent.cornersEventId,
+            this.watchedEvent.cornersCompId
+          );
         }
       });
 
@@ -241,24 +247,35 @@ export class WsFeed extends BaseFeed {
 
   /**
    * Subscribes to live price updates and handicap lines for a specific match.
-   * Watches both 'fb' and 'fb_ht' to guarantee in-running coverage in both halves.
+   * Watches both 'fb' and 'fb_ht' to guarantee in-running coverage in both halves,
+   * and optionally subscribes to a companion Corners event if linked.
    *
    * @param {number|string} competitionId
    * @param {string} sport - e.g. "fb"
    * @param {string} eventId
+   * @param {string} [cornersEventId]
+   * @param {number|string} [cornersCompId]
    */
-  subscribeToEvent(competitionId, sport, eventId) {
+  subscribeToEvent(competitionId, sport, eventId, cornersEventId = null, cornersCompId = null) {
     if (!competitionId || !eventId) return;
 
     const compId = Number(competitionId) || 0;
     const s = String(sport || 'fb');
     const id = String(eventId);
+    const cId = cornersEventId ? String(cornersEventId) : null;
+    const cCompId = Number(cornersCompId || compId) || compId;
 
     if (this.watchedEvent && (this.watchedEvent.eventId !== id)) {
-      this.unsubscribeEvent(this.watchedEvent.competitionId, this.watchedEvent.sport, this.watchedEvent.eventId);
+      this.unsubscribeEvent(
+        this.watchedEvent.competitionId,
+        this.watchedEvent.sport,
+        this.watchedEvent.eventId,
+        this.watchedEvent.cornersEventId,
+        this.watchedEvent.cornersCompId
+      );
     }
 
-    this.watchedEvent = { competitionId: compId, sport: s, eventId: id };
+    this.watchedEvent = { competitionId: compId, sport: s, eventId: id, cornersEventId: cId, cornersCompId: cCompId };
 
     if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
       // Build subscription targets: subscribe to primary sport + ht if football, or 'ih' if ice hockey
@@ -266,6 +283,10 @@ export class WsFeed extends BaseFeed {
       if (s.startsWith('fb')) {
         targets.push([compId, 'fb', id]);
         targets.push([compId, 'fb_ht', id]);
+        if (cId && cId !== id) {
+          targets.push([cCompId, 'fb', cId]);
+          targets.push([cCompId, 'fb_ht', cId]);
+        }
       } else if (s === 'ih') {
         targets.push([compId, 'ih', id]);
       } else {
@@ -279,7 +300,7 @@ export class WsFeed extends BaseFeed {
         this.ws.send(JSON.stringify(['watch_event', t]));
       }
 
-      logger.info('WsFeed', `Subscribed to live prices for event ${id} (comp: ${compId}, sports: ${targets.map(t => t[1]).join(', ')})`);
+      logger.info('WsFeed', `Subscribed to live prices for event ${id}${cId ? ` (+corners ${cId})` : ''} (comp: ${compId}, sports: ${targets.map(t => t[1]).join(', ')})`);
     }
   }
 
@@ -288,25 +309,29 @@ export class WsFeed extends BaseFeed {
    * @param {number|string} competitionId
    * @param {string} sport
    * @param {string} eventId
+   * @param {string} [cornersEventId]
+   * @param {number|string} [cornersCompId]
    */
-  unsubscribeEvent(competitionId, sport, eventId) {
+  unsubscribeEvent(competitionId, sport, eventId, cornersEventId = null, cornersCompId = null) {
     const compId = Number(competitionId) || 0;
     const s = String(sport || 'fb');
     const id = String(eventId);
+    const cId = cornersEventId ? String(cornersEventId) : null;
+    const cCompId = Number(cornersCompId || compId) || compId;
 
     // Evict lineSpectrums and eventActiveLines for this event
     for (const key of Array.from(this.eventActiveLines.keys())) {
-      if (key.startsWith(`${id}:`)) {
+      if (key.startsWith(`${id}:`) || (cId && key.startsWith(`${cId}:`))) {
         this.eventActiveLines.delete(key);
       }
     }
     for (const key of Array.from(this.lineSpectrums.keys())) {
-      if (key.startsWith(`${id}:`)) {
+      if (key.startsWith(`${id}:`) || (cId && key.startsWith(`${cId}:`))) {
         this.lineSpectrums.delete(key);
       }
     }
     for (const key of Array.from(this.eventScores.keys())) {
-      if (key.startsWith(`${id}:`)) {
+      if (key.startsWith(`${id}:`) || (cId && key.startsWith(`${cId}:`))) {
         this.eventScores.delete(key);
       }
     }
@@ -318,6 +343,10 @@ export class WsFeed extends BaseFeed {
       if (s.startsWith('fb')) {
         targets.push([compId, 'fb', id]);
         targets.push([compId, 'fb_ht', id]);
+        if (cId && cId !== id) {
+          targets.push([cCompId, 'fb', cId]);
+          targets.push([cCompId, 'fb_ht', cId]);
+        }
       } else if (s === 'ih') {
         targets.push([compId, 'ih', id]);
       } else {
@@ -567,9 +596,19 @@ export class WsFeed extends BaseFeed {
       }
     }
 
+    const isCorners = Boolean(
+      metadata.event_type === 'corners' ||
+      /\bcorners?\b/i.test(homeTeam) ||
+      /\bcorners?\b/i.test(awayTeam) ||
+      /\bcorners?\b/i.test(competition) ||
+      sport.includes('corn')
+    );
+
     const eventPayload = {
       eventId,
       sport,
+      eventType: metadata.event_type || (isCorners ? 'corners' : 'normal'),
+      isCorners,
       competitionId,
       competition,
       homeTeam,
@@ -846,6 +885,21 @@ export class WsFeed extends BaseFeed {
       totalLines: [],
       itb1Lines: [],
       itb2Lines: [],
+      cornersTotalOver: 0,
+      cornersTotalUnder: 0,
+      cornersTotalLine: null,
+      rawCornersTotalLineIndex: null,
+      cornersTotalLines: [],
+      cornersItb1Over: 0,
+      cornersItb1Under: 0,
+      cornersItb1Line: null,
+      rawCornersItb1LineIndex: null,
+      cornersItb1Lines: [],
+      cornersItb2Over: 0,
+      cornersItb2Under: 0,
+      cornersItb2Line: null,
+      rawCornersItb2LineIndex: null,
+      cornersItb2Lines: [],
       rawMarkets
     };
 
@@ -901,13 +955,55 @@ export class WsFeed extends BaseFeed {
       }
     }
 
+    if (marketSlice.hasCornersAhou && marketSlice.rawCornersAhou) {
+      const cAhouKey = `${scopeKey}:cahou`;
+      const parsedCAhou = this.parseTotalMarket(marketSlice.rawCornersAhou, '9.5', stickyLines.cornersTotalLine, cAhouKey, 'even_money', -1);
+      parsedOdds.cornersTotalLines = parsedCAhou.allLines || [];
+      if (parsedCAhou.totalOver > 0 || parsedCAhou.totalUnder > 0 || parsedCAhou.totalLine) {
+        parsedOdds.cornersTotalOver = parsedCAhou.totalOver;
+        parsedOdds.cornersTotalUnder = parsedCAhou.totalUnder;
+        parsedOdds.cornersTotalLine = parsedCAhou.totalLine;
+        parsedOdds.rawCornersTotalLineIndex = parsedCAhou.rawTotalLineIndex;
+        stickyLines.cornersTotalLine = parsedCAhou.totalLine;
+      }
+    }
+
+    if (marketSlice.hasCornersTahouH && marketSlice.rawCornersTahouH) {
+      const cItb1Key = `${scopeKey}:citb1`;
+      const parsedCTahouH = this.parseTotalMarket(marketSlice.rawCornersTahouH, '4.5', null, cItb1Key, 'lowest', -1);
+      parsedOdds.cornersItb1Lines = parsedCTahouH.allLines || [];
+      if (parsedCTahouH.totalOver > 0 || parsedCTahouH.totalUnder > 0 || parsedCTahouH.totalLine) {
+        parsedOdds.cornersItb1Over = parsedCTahouH.totalOver;
+        parsedOdds.cornersItb1Under = parsedCTahouH.totalUnder;
+        parsedOdds.cornersItb1Line = parsedCTahouH.totalLine;
+        parsedOdds.rawCornersItb1LineIndex = parsedCTahouH.rawTotalLineIndex;
+        stickyLines.cornersItb1Line = parsedCTahouH.totalLine;
+      }
+    }
+
+    if (marketSlice.hasCornersTahouA && marketSlice.rawCornersTahouA) {
+      const cItb2Key = `${scopeKey}:citb2`;
+      const parsedCTahouA = this.parseTotalMarket(marketSlice.rawCornersTahouA, '4.5', null, cItb2Key, 'lowest', -1);
+      parsedOdds.cornersItb2Lines = parsedCTahouA.allLines || [];
+      if (parsedCTahouA.totalOver > 0 || parsedCTahouA.totalUnder > 0 || parsedCTahouA.totalLine) {
+        parsedOdds.cornersItb2Over = parsedCTahouA.totalOver;
+        parsedOdds.cornersItb2Under = parsedCTahouA.totalUnder;
+        parsedOdds.cornersItb2Line = parsedCTahouA.totalLine;
+        parsedOdds.rawCornersItb2LineIndex = parsedCTahouA.rawTotalLineIndex;
+        stickyLines.cornersItb2Line = parsedCTahouA.totalLine;
+      }
+    }
+
     this.eventActiveLines.set(scopeKey, stickyLines);
 
     parsedOdds.updatedMarkets = {
       wdw: Boolean(marketSlice.hasWdw),
       ahou: Boolean(marketSlice.hasAhou),
       itb1: Boolean(marketSlice.hasTahouH),
-      itb2: Boolean(marketSlice.hasTahouA)
+      itb2: Boolean(marketSlice.hasTahouA),
+      cornersAhou: Boolean(marketSlice.hasCornersAhou),
+      cornersItb1: Boolean(marketSlice.hasCornersTahouH),
+      cornersItb2: Boolean(marketSlice.hasCornersTahouA)
     };
 
     return parsedOdds;
@@ -1057,7 +1153,8 @@ export class WsFeed extends BaseFeed {
       return;
     }
 
-    const isHtSport = sport === 'fb_ht';
+    const isHtSport = sport === 'fb_ht' || sport === 'fb_c_ht' || sport === 'fb_corn_ht';
+    const isCornersSport = sport === 'fb_c' || sport === 'fb_c_ht' || sport === 'fb_corn' || sport === 'fb_corn_ht' || sport === 'fb_corners';
     const defaultTotalLine = isHtSport ? '0.5' : '2.5';
     const defaultItbLine = isHtSport ? '0.5' : '1.5';
 
@@ -1066,20 +1163,30 @@ export class WsFeed extends BaseFeed {
     const hasTahouH = Object.prototype.hasOwnProperty.call(markets, 'tahou,h') || Object.prototype.hasOwnProperty.call(markets, 'tahou_h');
     const hasTahouA = Object.prototype.hasOwnProperty.call(markets, 'tahou,a') || Object.prototype.hasOwnProperty.call(markets, 'tahou_a');
 
+    const cAhouKey = ['cahou', 'corners,ahou', 'corner,ahou', 'ahou_corners'].find(k => Object.prototype.hasOwnProperty.call(markets, k));
+    const cTahouHKey = ['ctahou,h', 'ctahou_h', 'corners,tahou,h', 'corners,tahou_h', 'tahou_corners,h', 'tahou_corners_h'].find(k => Object.prototype.hasOwnProperty.call(markets, k));
+    const cTahouAKey = ['ctahou,a', 'ctahou_a', 'corners,tahou,a', 'corners,tahou_a', 'tahou_corners,a', 'tahou_corners_a'].find(k => Object.prototype.hasOwnProperty.call(markets, k));
+
     const parsedOdds = this._buildParsedOdds(
       eventId,
       `${eventId}:${sport}`,
       defaultTotalLine,
       defaultItbLine,
       {
-        hasWdw,
+        hasWdw: !isCornersSport && hasWdw,
         rawWdw: markets.wdw,
-        hasAhou,
+        hasAhou: !isCornersSport && hasAhou,
         rawAhou: markets.ahou,
-        hasTahouH,
+        hasTahouH: !isCornersSport && hasTahouH,
         rawTahouH: markets['tahou,h'] || markets.tahou_h,
-        hasTahouA,
-        rawTahouA: markets['tahou,a'] || markets.tahou_a
+        hasTahouA: !isCornersSport && hasTahouA,
+        rawTahouA: markets['tahou,a'] || markets.tahou_a,
+        hasCornersAhou: Boolean(cAhouKey) || (isCornersSport && hasAhou),
+        rawCornersAhou: cAhouKey ? markets[cAhouKey] : (isCornersSport ? markets.ahou : null),
+        hasCornersTahouH: Boolean(cTahouHKey) || (isCornersSport && hasTahouH),
+        rawCornersTahouH: cTahouHKey ? markets[cTahouHKey] : (isCornersSport ? (markets['tahou,h'] || markets.tahou_h) : null),
+        hasCornersTahouA: Boolean(cTahouAKey) || (isCornersSport && hasTahouA),
+        rawCornersTahouA: cTahouAKey ? markets[cTahouAKey] : (isCornersSport ? (markets['tahou,a'] || markets.tahou_a) : null)
       },
       markets
     );
@@ -1105,10 +1212,22 @@ export class WsFeed extends BaseFeed {
 
     for (const item of frame[1].data) {
       if (Array.isArray(item) && item[0] === 'balance' && item[1]) {
-        const bal = item[1].balance;
+        const bObj = item[1];
+        const extractAmt = (v) => {
+          if (Array.isArray(v) && v.length >= 2) return Number(v[1]);
+          if (typeof v === 'number') return v;
+          return null;
+        };
+        const bal = bObj.balance;
         if (Array.isArray(bal)) {
-          logger.info('WsFeed', `Account Balance: ${bal[0]} ${bal[1]}`);
-          this.emit('balance', { currency: bal[0], amount: Number(bal[1]) });
+          const currency = bal[0];
+          const amount = Number(bal[1]);
+          const available = extractAmt(bObj.available ?? bObj.available_balance ?? bObj.free_balance ?? bObj.bettable ?? bObj.credit_left);
+          const openStakes = extractAmt(bObj.open_stakes ?? bObj.unsettled_stakes ?? bObj.margin ?? bObj.exposure ?? bObj.reserved ?? bObj.in_play);
+          const total = extractAmt(bObj.total ?? bObj.total_balance ?? bObj.credit ?? bObj.equity);
+
+          logger.info('WsFeed', `Account Balance: ${currency} ${amount}${available != null ? ` (Available: ${available})` : ''}${openStakes != null ? ` (Open Stakes: ${openStakes})` : ''}`);
+          this.emit('balance', { currency, amount, available, openStakes, total, raw: bObj });
         }
       } else if (Array.isArray(item) && item[0] === 'betslip' && item[1]) {
         logger.debug('WsFeed', `Received betslip update for ${item[1].betslip_id}`);

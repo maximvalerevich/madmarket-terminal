@@ -1731,6 +1731,175 @@ engine.on('log', (log) => logCaptured.push(log));
   await goalFeed.destroy();
   console.log('✓ Soccer post-goal line advancement (ITB2 & OVER 0.5 -> 1.5 on 0:1) & spectrum eviction verified');
 
+  // 44. Test Available Balance vs Total Balance (Баланс: €50 / €90) in WsFeed, StateManager & TerminalUI HUD
+  const balFeed = new WsFeed(testConfig);
+  const smBal = new StateManager(testConfig);
+  smBal.setWsFeed(balFeed);
+
+  // Case A: Total balance €90 with €40 in active IN_PLAY orders -> Available: €50 / €90
+  balFeed.handleMessage(JSON.stringify([
+    'api',
+    {
+      ts: 1700000000,
+      data: [
+        ['balance', { balance: ['EUR', 90.0] }],
+        ['order', { order_id: 'ord_inplay_1', closed: true, price: 1.85, stake: ['EUR', 40.0], profit_loss: null }]
+      ]
+    }
+  ]), false);
+
+  assert.equal(smBal.accountBalance, 90.0, 'Total balance must be 90.0');
+  assert.equal(smBal.openStakes, 40.0, 'Open stakes from IN_PLAY order must be 40.0');
+  assert.equal(smBal.availableBalance, 50.0, 'Available balance must be 50.0 (90 - 40)');
+  assert.equal(smBal.getMaxStakeLimit(), 50.0, 'Max stake limit must cap at availableBalance (50.0)');
+
+  // Verify TerminalUI renders "(Баланс: €50 / €90)"
+  let capturedHudOutput = '';
+  const origStdoutWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => {
+    capturedHudOutput += String(chunk);
+    return true;
+  };
+  const uiBal = new TerminalUI({
+    stateManager: smBal,
+    executionEngine: engine,
+    http2Client: { isConnected: true, lastPingRttMs: 5 },
+    wsFeed: { isConnected: true, lastWsRttMs: 8 },
+    config: testConfig
+  });
+  try {
+    uiBal.renderHud();
+  } finally {
+    process.stdout.write = origStdoutWrite;
+  }
+  assert(capturedHudOutput.includes('(Баланс: €50 / €90)'), `HUD must display "(Баланс: €50 / €90)", got: ${capturedHudOutput}`);
+  console.log('✓ Available vs Total Balance (Баланс: €50 / €90) in WsFeed, StateManager & TerminalUI verified');
+
+  // 45. Test Team Corner ITB Lines (ИТБ угловые команд) separated for FT (Общий) and HT (1-й тайм)
+  // Both inline markets (ctahou,h / ctahou,a) and linked companion (Corners) events
+  const cornFeed = new WsFeed(testConfig);
+  const smCorn = new StateManager(testConfig);
+  smCorn.setWsFeed(cornFeed);
+  cornFeed.on('event_update', (ev) => smCorn.updateEventMetadata(ev));
+  cornFeed.on('odds_update', (od) => smCorn.updateOdds(od));
+
+  // Create main match + companion (Corners) match
+  cornFeed.handleMessage(JSON.stringify([
+    'event',
+    ['fb', 'fb_main_101'],
+    {
+      home: 'Liverpool',
+      away: 'Arsenal',
+      competition_id: 10,
+      competition_name: 'Premier League',
+      ir_status: { score: [0, 0], time: ['1h', 20] }
+    }
+  ]), false);
+
+  cornFeed.handleMessage(JSON.stringify([
+    'event',
+    ['fb', 'fb_corners_101'],
+    {
+      event_type: 'corners',
+      home: 'Liverpool (Corners)',
+      away: 'Arsenal (Corners)',
+      competition_id: 11,
+      competition_name: 'Premier League - Corners',
+      ir_status: { score: [1, 1], time: ['1h', 20] }
+    }
+  ]), false);
+
+  const mainEv = smCorn.eventsMap.get('fb_main_101');
+  assert.equal(mainEv.cornersEventId, 'fb_corners_101', 'Companion (Corners) event must auto-link to main football match');
+
+  smCorn.setActiveEvent('fb_main_101');
+
+  // Feed FT Corner ITB lines via inline ctahou,h / ctahou,a on main match
+  cornFeed.handleMessage(JSON.stringify([
+    'offers_hcap',
+    [10, 'fb', 'fb_main_101'],
+    {
+      'ctahou,h': [
+        [18, [['o', 1.75], ['u', 2.05]]],
+        [22, [['o', 2.25], ['u', 1.62]]]
+      ],
+      'ctahou,a': [
+        [14, [['o', 1.65], ['u', 2.20]]],
+        [18, [['o', 2.10], ['u', 1.72]]]
+      ]
+    }
+  ]), false);
+
+  // Feed HT (1st Half) Corner ITB lines via companion (Corners) event with sport "fb_ht"
+  cornFeed.handleMessage(JSON.stringify([
+    'offers_hcap',
+    [11, 'fb_ht', 'fb_corners_101'],
+    {
+      'tahou,h': [
+        [6, [['o', 1.60], ['u', 2.30]]],
+        [10, [['o', 2.15], ['u', 1.68]]]
+      ],
+      'tahou,a': [
+        [6, [['o', 1.88], ['u', 1.92]]],
+        [10, [['o', 2.60], ['u', 1.48]]]
+      ]
+    }
+  ]), false);
+
+  // Verify FT (Общий) Corner ITB lines
+  assert.equal(smCorn.liveOdds.ft.cornersItb1Lines.length, 2, 'FT must have 2 available Corners ITB1 lines (4.50, 5.50)');
+  assert.equal(smCorn.liveOdds.ft.cornersItb1Lines[0].totalLine, '4.50');
+  assert.equal(smCorn.liveOdds.ft.cornersItb1Lines[1].totalLine, '5.50');
+  assert.equal(smCorn.liveOdds.ft.cornersItb2Lines.length, 2, 'FT must have 2 available Corners ITB2 lines (3.50, 4.50)');
+  assert.equal(smCorn.liveOdds.ft.cornersItb2Lines[0].totalLine, '3.50');
+  assert.equal(smCorn.liveOdds.ft.cornersItb2Lines[1].totalLine, '4.50');
+
+  // Verify HT (1-й тайм) Corner ITB lines are strictly isolated from FT
+  assert.equal(smCorn.liveOdds.ht.cornersItb1Lines.length, 2, 'HT must have 2 available Corners ITB1 lines (1.50, 2.50)');
+  assert.equal(smCorn.liveOdds.ht.cornersItb1Lines[0].totalLine, '1.50');
+  assert.equal(smCorn.liveOdds.ht.cornersItb1Lines[1].totalLine, '2.50');
+  assert.equal(smCorn.liveOdds.ht.cornersItb2Lines.length, 2, 'HT must have 2 available Corners ITB2 lines (1.50, 2.50)');
+  assert.equal(smCorn.liveOdds.ht.cornersItb2Line, '1.50');
+  assert.equal(smCorn.liveOdds.ht.cornersItb2Over, 1.88);
+
+  // Verify HUD & Lines Menu render both FT (Общий) and HT (1-й тайм) Corner ITB lines
+  let capturedCornHud = '';
+  let capturedLinesMenu = '';
+  process.stdout.write = (chunk) => {
+    capturedCornHud += String(chunk);
+    return true;
+  };
+  const uiCorn = new TerminalUI({
+    stateManager: smCorn,
+    executionEngine: engine,
+    http2Client: { isConnected: true, lastPingRttMs: 5 },
+    wsFeed: { isConnected: true, lastWsRttMs: 8 },
+    config: testConfig
+  });
+  try {
+    uiCorn.renderHud();
+    process.stdout.write = (chunk) => {
+      capturedLinesMenu += String(chunk);
+      return true;
+    };
+    uiCorn.linesMarketTab = 'CORNERS_ITB1';
+    uiCorn.renderLinesMenu();
+  } finally {
+    process.stdout.write = origStdoutWrite;
+  }
+
+  assert(capturedCornHud.includes('Угловые ИТБ:'), 'HUD must display Угловые ИТБ line when broker provides corner lines');
+  assert(capturedCornHud.includes('[Общий FT]') && capturedCornHud.includes('[1-й тайм HT]'), 'HUD must display both Общий FT and 1-й тайм HT corner ITB sections');
+  assert(capturedCornHud.includes('4.50:1.75') && capturedCornHud.includes('5.50:2.25'), 'HUD must list FT Corners ITB1 lines');
+  assert(capturedCornHud.includes('1.50:1.60') && capturedCornHud.includes('2.50:2.15'), 'HUD must list HT Corners ITB1 lines');
+  assert(capturedLinesMenu.includes('ДОСТУПНЫЕ ЛИНИИ НА ИТБ УГЛОВЫЕ КОМАНД'), 'Lines Menu must render Corners ITB summary block');
+
+  smBal.destroy();
+  await balFeed.destroy();
+  smCorn.destroy();
+  await cornFeed.destroy();
+  console.log('✓ Team Corner ITB lines (FT Общий & HT 1-й тайм) parsing, companion event linking & HUD/Lines UI verified');
+
   stickyWsFeed.destroy();
   smHt.destroy();
   testWsFeed.destroy();

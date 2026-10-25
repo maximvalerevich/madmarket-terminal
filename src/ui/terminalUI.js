@@ -73,6 +73,8 @@ export class TerminalUI {
 
     this.couponsSelectedIndex = 0;
     this.linesSelectedIndex = 0;
+    /** @type {'OVER' | 'ITB1' | 'ITB2' | 'CORNERS_ITB1' | 'CORNERS_ITB2'} */
+    this.linesMarketTab = 'OVER';
 
     this.stakeInputBuffer = '';
 
@@ -233,6 +235,58 @@ export class TerminalUI {
   }
 
   /**
+   * Formats available Team Corner ITB lines for a given period (FT or HT).
+   * @param {Object} pOdds
+   * @returns {string}
+   */
+  formatPeriodCornersItb(pOdds) {
+    if (!pOdds) return '';
+    const formatSide = (label, activeLine, activeOver, linesArr) => {
+      if (Array.isArray(linesArr) && linesArr.length > 0) {
+        const listStr = linesArr
+          .map(x => `${x.totalLine}:${x.totalOver > 1.0 ? x.totalOver.toFixed(2) : '0.00'}`)
+          .join(', ');
+        return `${label}[${listStr}]`;
+      }
+      if (activeOver > 1.0) {
+        return `${label}(${activeLine}): ${activeOver.toFixed(2)}`;
+      }
+      return '';
+    };
+
+    const side1 = formatSide('ИТБ1', pOdds.cornersItb1Line || '4.5', pOdds.cornersItb1Over || 0, pOdds.cornersItb1Lines);
+    const side2 = formatSide('ИТБ2', pOdds.cornersItb2Line || '4.5', pOdds.cornersItb2Over || 0, pOdds.cornersItb2Lines);
+    if (!side1 && !side2) return '';
+    return [side1 || 'ИТБ1: —', side2 || 'ИТБ2: —'].join(' | ');
+  }
+
+  /**
+   * Formats HUD line displaying available Team Corner ITB lines separated for FT (Общий) and HT (1-й тайм),
+   * rendered only when the broker provides corner ITB lines.
+   * @returns {string}
+   */
+  formatCornersHudLine() {
+    const ftOdds = this.stateManager?.liveOdds?.ft;
+    const htOdds = this.stateManager?.liveOdds?.ht;
+    const ftStr = this.formatPeriodCornersItb(ftOdds);
+    const htStr = this.formatPeriodCornersItb(htOdds);
+
+    if (!ftStr && !htStr) return '';
+
+    const isHtActive = this.stateManager?.activePeriod === 'HT';
+    const parts = [];
+    if (ftStr) {
+      const tag = !isHtActive ? `${C.bold}${C.green}[Общий FT]${C.reset}` : `${C.dim}[Общий FT]${C.reset}`;
+      parts.push(`${tag} ${ftStr}`);
+    }
+    if (htStr) {
+      const tag = isHtActive ? `${C.bold}${C.yellow}[1-й тайм HT]${C.reset}` : `${C.dim}[1-й тайм HT]${C.reset}`;
+      parts.push(`${tag} ${htStr}`);
+    }
+    return `${C.cyan}Угловые ИТБ:${C.reset} ${parts.join('  ||  ')}`;
+  }
+
+  /**
    * Formats per-outcome stake limit. Highlighted when the current stake exceeds it
    * (the stake will be cut down to this limit on fire).
    * @param {Object} slip
@@ -366,8 +420,30 @@ export class TerminalUI {
       ? `${C.green}WS: ${wsRtt}ms${C.reset}`
       : `${C.red}WS: OFF${C.reset}`;
 
-    // 4. Stake display with account-level cap (per-outcome limits are shown on the odds line)
-    const limitDisplay = maxLimit > 0 ? ` (Баланс: €${Math.floor(maxLimit)})` : '';
+    // 4. Stake display with available vs total balance (Баланс: €50 / €90)
+    const totalBal = this.stateManager.accountBalance > 0
+      ? Math.floor(this.stateManager.accountBalance)
+      : Math.floor(maxLimit);
+    const hasAvailTracking = (
+      this.stateManager._explicitAvailableBalance !== null &&
+      this.stateManager._explicitAvailableBalance !== undefined
+    ) || (
+      this.stateManager._wsOpenStakes !== null &&
+      this.stateManager._wsOpenStakes !== undefined
+    ) || (
+      this.stateManager.openStakes > 0
+    ) || (
+      this.stateManager.availableBalance > 0 &&
+      this.stateManager.availableBalance !== this.stateManager.accountBalance
+    );
+    const availBal = this.stateManager.accountBalance > 0
+      ? (hasAvailTracking || this.stateManager.availableBalance > 0
+          ? Math.floor(this.stateManager.availableBalance)
+          : totalBal)
+      : Math.floor(maxLimit);
+    const limitDisplay = (totalBal > 0 || availBal > 0)
+      ? ` (Баланс: €${availBal} / €${totalBal})`
+      : '';
     const stakeBadge = `${C.bold}Ставка: ${currency} ${stake}${limitDisplay}${C.reset}`;
 
     // 5. Line 1: Match info, period/mode. Line 2: stake, network
@@ -377,7 +453,7 @@ export class TerminalUI {
     // 5b. Line 2: Active combat odds with per-outcome stake limits
     const oddsLine = `${C.bold}Кэфы:${C.reset} ${lineLabel}: ${overStatus} | ${slot2Label}: ${slot2Status} | ${slot3Label}: ${slot3Status}`;
 
-    // 6. Line 2: Alternate markets & period preview
+    // 6. Line 2: Alternate markets & period preview + Team Corner ITB lines (FT & HT)
     let altPeriodLine;
     const p = this.stateManager.activePeriod;
     const odds = p === 'HT' ? this.stateManager.liveOdds.ht : this.stateManager.liveOdds.ft;
@@ -392,6 +468,8 @@ export class TerminalUI {
       const aStr = odds.winAway > 1.0 ? odds.winAway.toFixed(2) : `${C.bold}${C.red}0.00${C.reset}`;
       altPeriodLine = `${C.dim}Линия 1X2 (${p}):${C.reset} 1: ${hStr} | X: ${dStr} | 2: ${aStr}  ${C.yellow}['I' — режим 1X2, 'T' — тайм]${C.reset}`;
     }
+
+    const cornersLine = this.formatCornersHudLine();
 
     // 7. Line 3: Persistent Combat Order Banner (tracks full lifecycle: in-flight -> done / rejected)
     let orderLine;
@@ -503,6 +581,8 @@ export class TerminalUI {
     const pLabel = this.stateManager.activePeriod;
     const hotkeysLine = `${C.cyan}[SPACE=ТОТАЛ, 1/2=УДАР, 6/7=ИТБ, L=ЛИНИИ, </>=СМЕНА ТБ, I=РЕЖИМ, T=ТАЙМ, 3/4/5=HT, X/Shift+D=СБРОС КУПОНОВ, B=ИСТОРИЯ, M=МЕНЮ, TAB=ЛОГИ, Q=ВЫХОД]${C.reset}`;
 
+    const cornersHudOutput = cornersLine ? `${C.clearLine}${cornersLine}\n` : `${C.clearLine}\n`;
+
     process.stdout.write(
       `${C.cursorHome}` +
       `${C.clearLine}${hudLine1}\n` +
@@ -513,7 +593,7 @@ export class TerminalUI {
       `${C.clearLine}${oddsLine}\n` +
       `${C.clearLine}\n` +
       `${C.clearLine}${altPeriodLine}\n` +
-      `${C.clearLine}\n` +
+      `${cornersHudOutput}` +
       `${betsOutput}` +
       `${C.clearLine}${sessionItoStr}\n` +
       `${C.clearLine}\n` +
@@ -577,24 +657,98 @@ export class TerminalUI {
   }
 
   /**
-   * Renders the interactive Total Line Selection Menu.
+   * Returns lines list, current line, and targetKey for the active tab in the Lines Menu.
+   * @returns {{ availableLines: Array<Object>, currentLine: string, currentOver: number, currentUnder: number, targetKey: string, tabLabel: string }}
+   */
+  _getActiveLinesTabConfig() {
+    const isHt = this.stateManager.activePeriod === 'HT';
+    const pOdds = isHt ? this.stateManager.liveOdds.ht : this.stateManager.liveOdds.ft;
+    const tab = this.linesMarketTab || 'OVER';
+
+    if (tab === 'ITB1') {
+      return {
+        availableLines: pOdds.itb1Lines || [],
+        currentLine: pOdds.itb1Line || (isHt ? '0.5' : '1.5'),
+        currentOver: pOdds.itb1Over || 0,
+        currentUnder: pOdds.itb1Under || 0,
+        targetKey: isHt ? 'HT_ITB1' : 'ITB1',
+        tabLabel: 'ИТБ1 (Хозяева)'
+      };
+    }
+    if (tab === 'ITB2') {
+      return {
+        availableLines: pOdds.itb2Lines || [],
+        currentLine: pOdds.itb2Line || (isHt ? '0.5' : '1.5'),
+        currentOver: pOdds.itb2Over || 0,
+        currentUnder: pOdds.itb2Under || 0,
+        targetKey: isHt ? 'HT_ITB2' : 'ITB2',
+        tabLabel: 'ИТБ2 (Гости)'
+      };
+    }
+    if (tab === 'CORNERS_ITB1') {
+      return {
+        availableLines: pOdds.cornersItb1Lines || [],
+        currentLine: pOdds.cornersItb1Line || (isHt ? '1.5' : '4.5'),
+        currentOver: pOdds.cornersItb1Over || 0,
+        currentUnder: pOdds.cornersItb1Under || 0,
+        targetKey: isHt ? 'HT_CORNERS_ITB1' : 'CORNERS_ITB1',
+        tabLabel: 'УГЛОВЫЕ ИТБ1 (Хозяева)'
+      };
+    }
+    if (tab === 'CORNERS_ITB2') {
+      return {
+        availableLines: pOdds.cornersItb2Lines || [],
+        currentLine: pOdds.cornersItb2Line || (isHt ? '1.5' : '4.5'),
+        currentOver: pOdds.cornersItb2Over || 0,
+        currentUnder: pOdds.cornersItb2Under || 0,
+        targetKey: isHt ? 'HT_CORNERS_ITB2' : 'CORNERS_ITB2',
+        tabLabel: 'УГЛОВЫЕ ИТБ2 (Гости)'
+      };
+    }
+
+    return {
+      availableLines: pOdds.totalLines || [],
+      currentLine: pOdds.totalLine || (isHt ? '0.5' : '2.5'),
+      currentOver: pOdds.totalOver || 0,
+      currentUnder: pOdds.totalUnder || 0,
+      targetKey: isHt ? 'HT_OVER' : 'OVER',
+      tabLabel: 'ОБЩИЙ ТОТАЛ (OVER)'
+    };
+  }
+
+  /**
+   * Renders the interactive Total / ITB / Corners ITB Line Selection Menu.
    */
   renderLinesMenu() {
     const isHt = this.stateManager.activePeriod === 'HT';
-    const pOdds = isHt ? this.stateManager.liveOdds.ht : this.stateManager.liveOdds.ft;
-    const isItb = this.stateManager.activeMarketMode === 'ITB';
+    const ftOdds = this.stateManager.liveOdds.ft;
+    const htOdds = this.stateManager.liveOdds.ht;
+    const { availableLines: rawLines, currentLine, currentOver, currentUnder, tabLabel } = this._getActiveLinesTabConfig();
+    let availableLines = rawLines;
 
-    let availableLines = pOdds.totalLines || [];
-    let currentLine = pOdds.totalLine;
-    let title = isHt ? 'ВЫБОР ЗНАЧЕНИЯ ТОТАЛА (1-Й ТАЙМ / HT)' : 'ВЫБОР ЗНАЧЕНИЯ ТОТАЛА (МАТЧ / FT)';
+    const title = isHt ? 'ВЫБОР ЛИНИИ ТОТАЛА / ИТБ (1-Й ТАЙМ / HT)' : 'ВЫБОР ЛИНИИ ТОТАЛА / ИТБ (ОБЩИЙ МАТЧ / FT)';
+    const tabs = [
+      { id: 'OVER', name: 'ТОТАЛ' },
+      { id: 'ITB1', name: 'ИТБ1' },
+      { id: 'ITB2', name: 'ИТБ2' },
+      { id: 'CORNERS_ITB1', name: 'УГЛ ИТБ1' },
+      { id: 'CORNERS_ITB2', name: 'УГЛ ИТБ2' }
+    ];
+    const tabsBar = tabs.map(t => (
+      t.id === (this.linesMarketTab || 'OVER')
+        ? `${C.bgCyan}${C.black}${C.bold} [${t.name}] ${C.reset}`
+        : `${C.dim}  ${t.name}  ${C.reset}`
+    )).join(' ');
 
     let output = `${C.clearScreen}`;
     output += `${C.bold}${C.cyan}=== ${title} ===${C.reset}\n`;
-    output += `Текущая активная линия: ${C.bold}${C.green}Over ${currentLine}${C.reset}\n`;
-    output += `${C.dim}Стрелки ВВЕРХ/ВНИЗ или [1-9] — выбрать линию, ENTER/ПРОБЕЛ — подтвердить и взвести купон,\n`;
+    output += `Маркет: ${tabsBar}   ${C.yellow}(Стрелки ВЛЕВО/ВПРАВО — смена маркета, 'T' — смена FT/HT)${C.reset}\n`;
+    output += `Текущая активная линия (${tabLabel}): ${C.bold}${C.green}Over ${currentLine}${C.reset}\n`;
+    output += `${C.dim}Стрелки ВВЕРХ/ВНИЗ или [1-9] — выбрать линию, ENTER/ПРОБЕЛ — подтвердить,\n`;
     output += `'L' или ESC — вернуться в боевой HUD.${C.reset}\n\n`;
 
-    if (availableLines.length === 0) {
+    const isCornersTab = (this.linesMarketTab || '').startsWith('CORNERS_');
+    if (availableLines.length === 0 && !isCornersTab) {
       // Generate synthetic standard step lines if feed hasn't provided multi-line offers yet
       const curNum = parseFloat(currentLine) || (isHt ? 0.5 : 2.5);
       const synth = [];
@@ -604,8 +758,8 @@ export class TerminalUI {
           synth.push({
             totalLine: val.toFixed(1),
             rawTotalLineIndex: Math.round(val * 4),
-            totalOver: val === curNum ? pOdds.totalOver : 0,
-            totalUnder: val === curNum ? pOdds.totalUnder : 0
+            totalOver: val === curNum ? currentOver : 0,
+            totalUnder: val === curNum ? currentUnder : 0
           });
         }
       }
@@ -616,19 +770,32 @@ export class TerminalUI {
       this.linesSelectedIndex = Math.max(0, availableLines.length - 1);
     }
 
-    for (let i = 0; i < availableLines.length; i++) {
-      const lineObj = availableLines[i];
-      const isSelected = i === this.linesSelectedIndex;
-      const isCurrentActive = lineObj.totalLine === currentLine;
+    if (availableLines.length === 0) {
+      output += `${C.yellow}Брокер в данный момент не отдает линии для [${tabLabel}] в периоде [${isHt ? '1-й тайм HT' : 'Общий FT'}].${C.reset}\n`;
+    } else {
+      for (let i = 0; i < availableLines.length; i++) {
+        const lineObj = availableLines[i];
+        const isSelected = i === this.linesSelectedIndex;
+        const isCurrentActive = lineObj.totalLine === currentLine;
 
-      const prefix = isSelected ? `${C.bgGreen}${C.bold} > [${i + 1}] ` : `   [${i + 1}] `;
-      const resetSuffix = isSelected ? `${C.reset}` : '';
+        const prefix = isSelected ? `${C.bgGreen}${C.bold} > [${i + 1}] ` : `   [${i + 1}] `;
+        const resetSuffix = isSelected ? `${C.reset}` : '';
 
-      const activeBadge = isCurrentActive ? `${C.green}${C.bold} [АКТИВНАЯ ЛИНИЯ]${C.reset}` : '';
-      const overStr = lineObj.totalOver > 1.0 ? `${C.bold}${lineObj.totalOver.toFixed(2)}${C.reset}` : `${C.dim}0.00${C.reset}`;
-      const underStr = lineObj.totalUnder > 1.0 ? `${lineObj.totalUnder.toFixed(2)}` : '0.00';
+        const activeBadge = isCurrentActive ? `${C.green}${C.bold} [АКТИВНАЯ ЛИНИЯ]${C.reset}` : '';
+        const overStr = lineObj.totalOver > 1.0 ? `${C.bold}${lineObj.totalOver.toFixed(2)}${C.reset}` : `${C.dim}0.00${C.reset}`;
+        const underStr = lineObj.totalUnder > 1.0 ? `${lineObj.totalUnder.toFixed(2)}` : '0.00';
 
-      output += `${prefix}Тотал ${lineObj.totalLine.padEnd(5)} | ТБ (Over): ${overStr.padEnd(14)} | ТМ (Under): ${underStr.padEnd(6)}${activeBadge}${resetSuffix}\n`;
+        output += `${prefix}Линия ${lineObj.totalLine.padEnd(5)} | ТБ (Over): ${overStr.padEnd(14)} | ТМ (Under): ${underStr.padEnd(6)}${activeBadge}${resetSuffix}\n`;
+      }
+    }
+
+    // Dedicated summary of broker's available Team Corner ITB lines separated by FT (Общий) and HT (1-й тайм)
+    const ftCornersStr = this.formatPeriodCornersItb(ftOdds);
+    const htCornersStr = this.formatPeriodCornersItb(htOdds);
+    if (ftCornersStr || htCornersStr) {
+      output += `\n${C.bold}${C.cyan}--- ДОСТУПНЫЕ ЛИНИИ НА ИТБ УГЛОВЫЕ КОМАНД (ОТ БРОКЕРА) ---${C.reset}\n`;
+      output += `  ${C.bold}Общий (FT):${C.reset}    ${ftCornersStr || `${C.dim}нет активных линий от брокера${C.reset}`}\n`;
+      output += `  ${C.bold}1-й тайм (HT):${C.reset} ${htCornersStr || `${C.dim}нет активных линий от брокера${C.reset}`}\n`;
     }
 
     output += `\n${C.dim}Быстрые клавиши в HUD: '<' / '>' — переключение линии на лету без меню.${C.reset}\n`;
@@ -1169,12 +1336,37 @@ export class TerminalUI {
       process.exit(0);
     }
 
-    const isHt = this.stateManager.activePeriod === 'HT';
-    const pOdds = isHt ? this.stateManager.liveOdds.ht : this.stateManager.liveOdds.ft;
-    let lines = pOdds.totalLines || [];
+    if (str === 't' || str === 'T') {
+      this.stateManager.togglePeriod().then(() => {
+        this.linesSelectedIndex = 0;
+        this.render();
+      }).catch(() => {});
+      return;
+    }
 
-    if (lines.length === 0) {
-      const curNum = parseFloat(pOdds.totalLine) || (isHt ? 0.5 : 2.5);
+    const tabOrder = ['OVER', 'ITB1', 'ITB2', 'CORNERS_ITB1', 'CORNERS_ITB2'];
+    if (key.name === 'left' || str === '[') {
+      const curIdx = Math.max(0, tabOrder.indexOf(this.linesMarketTab || 'OVER'));
+      this.linesMarketTab = tabOrder[(curIdx - 1 + tabOrder.length) % tabOrder.length];
+      this.linesSelectedIndex = 0;
+      this.render();
+      return;
+    }
+    if (key.name === 'right' || str === ']') {
+      const curIdx = Math.max(0, tabOrder.indexOf(this.linesMarketTab || 'OVER'));
+      this.linesMarketTab = tabOrder[(curIdx + 1) % tabOrder.length];
+      this.linesSelectedIndex = 0;
+      this.render();
+      return;
+    }
+
+    const isHt = this.stateManager.activePeriod === 'HT';
+    const { availableLines: rawLines, currentLine, currentOver, currentUnder, targetKey } = this._getActiveLinesTabConfig();
+    let lines = rawLines;
+    const isCornersTab = (this.linesMarketTab || '').startsWith('CORNERS_');
+
+    if (lines.length === 0 && !isCornersTab) {
+      const curNum = parseFloat(currentLine) || (isHt ? 0.5 : 2.5);
       const synth = [];
       for (let offset = -2; offset <= 3; offset++) {
         const val = curNum + offset * 0.5;
@@ -1182,8 +1374,8 @@ export class TerminalUI {
           synth.push({
             totalLine: val.toFixed(1),
             rawTotalLineIndex: Math.round(val * 4),
-            totalOver: 0,
-            totalUnder: 0
+            totalOver: val === curNum ? currentOver : 0,
+            totalUnder: val === curNum ? currentUnder : 0
           });
         }
       }
@@ -1211,7 +1403,6 @@ export class TerminalUI {
       const idx = parseInt(str, 10) - 1;
       if (idx >= 0 && idx < lines.length) {
         const selected = lines[idx];
-        const targetKey = isHt ? 'HT_OVER' : 'OVER';
         this.stateManager.setUserLineOverride(targetKey, selected.totalLine, selected.rawTotalLineIndex).then(() => {
           this.mode = 'HUD';
           process.stdout.write(C.clearScreen);
@@ -1225,7 +1416,6 @@ export class TerminalUI {
     if (key.name === 'return' || key.name === 'enter' || key.name === 'space' || str === ' ') {
       if (lines.length > 0 && this.linesSelectedIndex < lines.length) {
         const selected = lines[this.linesSelectedIndex];
-        const targetKey = isHt ? 'HT_OVER' : 'OVER';
         this.stateManager.setUserLineOverride(targetKey, selected.totalLine, selected.rawTotalLineIndex).then(() => {
           this.mode = 'HUD';
           process.stdout.write(C.clearScreen);

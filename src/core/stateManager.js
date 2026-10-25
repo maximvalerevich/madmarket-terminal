@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { logger } from '../utils/logger.js';
 import { getAllowedBookies } from '../utils/configHelpers.js';
+import { normalizeOrder } from '../utils/orderNormalizer.js';
 
 /**
  * StateManager
@@ -27,6 +28,10 @@ export class StateManager extends EventEmitter {
 
     // Account limits pulled from broker feed
     this.accountBalance = 0;
+    this.availableBalance = 0;
+    this.openStakes = 0;
+    this._explicitAvailableBalance = null;
+    this._wsOpenStakes = null;
     this.accountCurrency = config.defaultCurrency || 'EUR';
 
     /** @type {'FT' | 'HT'} */
@@ -68,7 +73,22 @@ export class StateManager extends EventEmitter {
         itb2Under: 0,
         itb2Line: '1.5',
         rawItb2LineIndex: 6,
-        itb2Lines: []
+        itb2Lines: [],
+        cornersTotalOver: 0,
+        cornersTotalUnder: 0,
+        cornersTotalLine: '9.5',
+        rawCornersTotalLineIndex: 38,
+        cornersTotalLines: [],
+        cornersItb1Over: 0,
+        cornersItb1Under: 0,
+        cornersItb1Line: '4.5',
+        rawCornersItb1LineIndex: 18,
+        cornersItb1Lines: [],
+        cornersItb2Over: 0,
+        cornersItb2Under: 0,
+        cornersItb2Line: '4.5',
+        rawCornersItb2LineIndex: 18,
+        cornersItb2Lines: []
       },
       ht: {
         totalOver: 0,
@@ -88,7 +108,22 @@ export class StateManager extends EventEmitter {
         itb2Under: 0,
         itb2Line: '0.5',
         rawItb2LineIndex: 2,
-        itb2Lines: []
+        itb2Lines: [],
+        cornersTotalOver: 0,
+        cornersTotalUnder: 0,
+        cornersTotalLine: '4.5',
+        rawCornersTotalLineIndex: 18,
+        cornersTotalLines: [],
+        cornersItb1Over: 0,
+        cornersItb1Under: 0,
+        cornersItb1Line: '2.5',
+        rawCornersItb1LineIndex: 10,
+        cornersItb1Lines: [],
+        cornersItb2Over: 0,
+        cornersItb2Under: 0,
+        cornersItb2Line: '2.5',
+        rawCornersItb2LineIndex: 10,
+        cornersItb2Lines: []
       },
       get totalOver() { return (self.activePeriod === 'HT' ? this.ht.totalOver : this.ft.totalOver) || 0; },
       set totalOver(v) { if (self.activePeriod === 'HT') this.ht.totalOver = v; else this.ft.totalOver = v; },
@@ -119,7 +154,22 @@ export class StateManager extends EventEmitter {
       get itb2Line() { return self.activePeriod === 'HT' ? this.ht.itb2Line : this.ft.itb2Line; },
       set itb2Line(v) { if (self.activePeriod === 'HT') this.ht.itb2Line = v; else this.ft.itb2Line = v; },
       get rawItb2LineIndex() { return self.activePeriod === 'HT' ? this.ht.rawItb2LineIndex : this.ft.rawItb2LineIndex; },
-      set rawItb2LineIndex(v) { if (self.activePeriod === 'HT') this.ht.rawItb2LineIndex = v; else this.ft.rawItb2LineIndex = v; }
+      set rawItb2LineIndex(v) { if (self.activePeriod === 'HT') this.ht.rawItb2LineIndex = v; else this.ft.rawItb2LineIndex = v; },
+      get cornersTotalOver() { return (self.activePeriod === 'HT' ? this.ht.cornersTotalOver : this.ft.cornersTotalOver) || 0; },
+      set cornersTotalOver(v) { if (self.activePeriod === 'HT') this.ht.cornersTotalOver = v; else this.ft.cornersTotalOver = v; },
+      get cornersTotalLine() { return self.activePeriod === 'HT' ? this.ht.cornersTotalLine : this.ft.cornersTotalLine; },
+      set cornersTotalLine(v) { if (self.activePeriod === 'HT') this.ht.cornersTotalLine = v; else this.ft.cornersTotalLine = v; },
+      get cornersTotalLines() { return (self.activePeriod === 'HT' ? this.ht.cornersTotalLines : this.ft.cornersTotalLines) || []; },
+      get cornersItb1Over() { return (self.activePeriod === 'HT' ? this.ht.cornersItb1Over : this.ft.cornersItb1Over) || 0; },
+      set cornersItb1Over(v) { if (self.activePeriod === 'HT') this.ht.cornersItb1Over = v; else this.ft.cornersItb1Over = v; },
+      get cornersItb1Line() { return self.activePeriod === 'HT' ? this.ht.cornersItb1Line : this.ft.cornersItb1Line; },
+      set cornersItb1Line(v) { if (self.activePeriod === 'HT') this.ht.cornersItb1Line = v; else this.ft.cornersItb1Line = v; },
+      get cornersItb1Lines() { return (self.activePeriod === 'HT' ? this.ht.cornersItb1Lines : this.ft.cornersItb1Lines) || []; },
+      get cornersItb2Over() { return (self.activePeriod === 'HT' ? this.ht.cornersItb2Over : this.ft.cornersItb2Over) || 0; },
+      set cornersItb2Over(v) { if (self.activePeriod === 'HT') this.ht.cornersItb2Over = v; else this.ft.cornersItb2Over = v; },
+      get cornersItb2Line() { return self.activePeriod === 'HT' ? this.ht.cornersItb2Line : this.ft.cornersItb2Line; },
+      set cornersItb2Line(v) { if (self.activePeriod === 'HT') this.ht.cornersItb2Line = v; else this.ft.cornersItb2Line = v; },
+      get cornersItb2Lines() { return (self.activePeriod === 'HT' ? this.ht.cornersItb2Lines : this.ft.cornersItb2Lines) || []; }
     };
 
     /**
@@ -230,6 +280,34 @@ export class StateManager extends EventEmitter {
       voidCount,
       rejectedCount
     };
+    this._recalculateAvailableBalance();
+  }
+
+  /**
+   * Recalculates availableBalance from accountBalance and any active/in-play stakes.
+   */
+  _recalculateAvailableBalance() {
+    if (this._explicitAvailableBalance != null && !Number.isNaN(this._explicitAvailableBalance)) {
+      this.availableBalance = Math.max(0, Number(this._explicitAvailableBalance.toFixed(2)));
+      this.openStakes = Math.max(0, Number((this.accountBalance - this.availableBalance).toFixed(2)));
+      return;
+    }
+
+    let inPlayStakes = 0;
+    if (Array.isArray(this.ordersHistory)) {
+      for (const order of this.ordersHistory) {
+        if (order.normalizedStatus === 'IN_PLAY' || order.normalizedStatus === 'PENDING') {
+          inPlayStakes += Number(order.effStake) || 0;
+        }
+      }
+    }
+
+    const activeOpen = (this._wsOpenStakes != null && !Number.isNaN(this._wsOpenStakes))
+      ? Math.max(this._wsOpenStakes, inPlayStakes)
+      : inPlayStakes;
+
+    this.openStakes = Number(activeOpen.toFixed(2));
+    this.availableBalance = Math.max(0, Number((this.accountBalance - this.openStakes).toFixed(2)));
   }
 
   /**
@@ -292,7 +370,22 @@ export class StateManager extends EventEmitter {
       itb2Under: 0,
       itb2Line: isHt ? '0.5' : '1.5',
       rawItb2LineIndex: isHt ? 2 : 6,
-      itb2Lines: []
+      itb2Lines: [],
+      cornersTotalOver: 0,
+      cornersTotalUnder: 0,
+      cornersTotalLine: isHt ? '4.5' : '9.5',
+      rawCornersTotalLineIndex: isHt ? 18 : 38,
+      cornersTotalLines: [],
+      cornersItb1Over: 0,
+      cornersItb1Under: 0,
+      cornersItb1Line: isHt ? '2.5' : '4.5',
+      rawCornersItb1LineIndex: isHt ? 10 : 18,
+      cornersItb1Lines: [],
+      cornersItb2Over: 0,
+      cornersItb2Under: 0,
+      cornersItb2Line: isHt ? '2.5' : '4.5',
+      rawCornersItb2LineIndex: isHt ? 10 : 18,
+      cornersItb2Lines: []
     };
   }
 
@@ -408,11 +501,33 @@ export class StateManager extends EventEmitter {
   setWsFeed(wsFeed) {
     this.wsFeed = wsFeed;
 
-    wsFeed.on('balance', ({ currency, amount }) => {
-      this.accountBalance = amount;
-      this.accountCurrency = currency;
-      logger.info('StateManager', `Updated live balance: ${currency} ${amount}`);
-      this.emit('balance_updated', { currency, amount });
+    wsFeed.on('balance', ({ currency, amount, available, openStakes, total }) => {
+      this.accountCurrency = currency || this.accountCurrency;
+      if (total != null && available != null) {
+        this.accountBalance = Number(total);
+        this._explicitAvailableBalance = Number(available);
+        this._wsOpenStakes = openStakes != null ? Number(openStakes) : null;
+      } else if (available != null) {
+        this.accountBalance = Number(amount);
+        this._explicitAvailableBalance = Number(available);
+        this._wsOpenStakes = openStakes != null ? Number(openStakes) : null;
+      } else if (openStakes != null) {
+        this.accountBalance = Number(amount);
+        this._wsOpenStakes = Number(openStakes);
+        this._explicitAvailableBalance = null;
+      } else {
+        this.accountBalance = Number(amount);
+        this._explicitAvailableBalance = null;
+        this._wsOpenStakes = null;
+      }
+      this._recalculateAvailableBalance();
+      logger.info('StateManager', `Updated live balance: ${this.accountCurrency} ${this.availableBalance} / ${this.accountBalance}`);
+      this.emit('balance_updated', {
+        currency: this.accountCurrency,
+        amount: this.accountBalance,
+        available: this.availableBalance,
+        openStakes: this.openStakes
+      });
       this.emit('state_updated');
     });
 
@@ -428,8 +543,22 @@ export class StateManager extends EventEmitter {
       this.handleBetslipClosed(closedData);
     });
 
-    wsFeed.on('order_update', () => {
-      // Fetch instantly on any order update via WS to update PnL
+    wsFeed.on('order_update', (orderObj) => {
+      if (orderObj && typeof orderObj === 'object') {
+        const normalized = normalizeOrder(orderObj);
+        const ordId = String(normalized.order_id || normalized.id || '');
+        if (ordId) {
+          const existingIdx = this.ordersHistory.findIndex(o => String(o.order_id || o.id || '') === ordId);
+          if (existingIdx !== -1) {
+            this.ordersHistory[existingIdx] = normalized;
+          } else {
+            this.ordersHistory.unshift(normalized);
+          }
+          this.recalculateSessionMetrics();
+          this.emit('state_updated');
+        }
+      }
+      // Also trigger background history sync if adapter is attached
       this.fetchOrdersHistory();
     });
   }
@@ -616,11 +745,28 @@ export class StateManager extends EventEmitter {
         ? { ...this.createEmptyPeriodOdds('HT', evSport), ...event.odds.ht }
         : this.createEmptyPeriodOdds('HT', evSport);
 
+      // Merge corner ITB/Total lines from linked companion (Corners) event if available
+      const cornersEv = event.cornersEventId ? this.eventsMap.get(event.cornersEventId) : null;
+      if (cornersEv?.odds) {
+        for (const pk of ['ft', 'ht']) {
+          const cOdds = cornersEv.odds[pk];
+          if (cOdds) {
+            this._mergeCornersIntoPeriodOdds(this.liveOdds[pk], cOdds);
+          }
+        }
+      }
+
       this._reconcileOddsWithScore(this.activeEventId, 'ft', this.liveScoreFt);
       this._reconcileOddsWithScore(this.activeEventId, 'ht', this.liveScoreHt);
 
       if (this.wsFeed) {
-        this.wsFeed.subscribeToEvent(event.competitionId, event.sport, this.activeEventId);
+        this.wsFeed.subscribeToEvent(
+          event.competitionId,
+          event.sport,
+          this.activeEventId,
+          event.cornersEventId || null,
+          cornersEv?.competitionId || event.competitionId
+        );
       }
     } else {
       // Event not yet in eventsMap: ensure odds and scores are cleanly reset to defaults
@@ -771,6 +917,133 @@ export class StateManager extends EventEmitter {
   }
 
   /**
+   * Normalizes a team name by stripping "(Corners)" / "(Угловые)" suffix.
+   * @param {string} name
+   * @returns {string}
+   */
+  _normalizeBaseTeamName(name) {
+    if (!name) return '';
+    return String(name)
+      .replace(/\s*\((?:corners?|угловые)\)\s*/gi, '')
+      .trim()
+      .toLowerCase();
+  }
+
+  /**
+   * Links a companion (Corners) event to its parent normal football match (or vice versa)
+   * so corner ITB/Total lines from companion events are automatically merged into the main match.
+   * @param {Object} updatedEvent
+   */
+  _linkCornersEvent(updatedEvent) {
+    if (!updatedEvent || !updatedEvent.eventId) return;
+    const isCorn = Boolean(
+      updatedEvent.isCorners ||
+      updatedEvent.eventType === 'corners' ||
+      /\b(?:corners?|угловые)\b/i.test(updatedEvent.homeTeam || '') ||
+      /\b(?:corners?|угловые)\b/i.test(updatedEvent.awayTeam || '') ||
+      /\b(?:corners?|угловые)\b/i.test(updatedEvent.competition || '')
+    );
+    updatedEvent.isCorners = isCorn;
+
+    const baseHome = this._normalizeBaseTeamName(updatedEvent.homeTeam);
+    const baseAway = this._normalizeBaseTeamName(updatedEvent.awayTeam);
+    if (!baseHome || !baseAway || baseHome === 'home') return;
+
+    for (const [otherId, otherEv] of this.eventsMap.entries()) {
+      if (otherId === updatedEvent.eventId) continue;
+      const otherIsCorn = Boolean(
+        otherEv.isCorners ||
+        otherEv.eventType === 'corners' ||
+        /\b(?:corners?|угловые)\b/i.test(otherEv.homeTeam || '') ||
+        /\b(?:corners?|угловые)\b/i.test(otherEv.awayTeam || '') ||
+        /\b(?:corners?|угловые)\b/i.test(otherEv.competition || '')
+      );
+      if (isCorn === otherIsCorn) continue;
+
+      const otherHome = this._normalizeBaseTeamName(otherEv.homeTeam);
+      const otherAway = this._normalizeBaseTeamName(otherEv.awayTeam);
+      if (baseHome === otherHome && baseAway === otherAway) {
+        const parentEv = isCorn ? otherEv : updatedEvent;
+        const cornersEv = isCorn ? updatedEvent : otherEv;
+        parentEv.cornersEventId = cornersEv.eventId;
+        cornersEv.parentEventId = parentEv.eventId;
+
+        if (cornersEv.odds) {
+          if (!parentEv.odds) parentEv.odds = { ft: {}, ht: {} };
+          for (const pk of ['ft', 'ht']) {
+            if (cornersEv.odds[pk]) {
+              if (!parentEv.odds[pk]) parentEv.odds[pk] = {};
+              this._mergeCornersIntoPeriodOdds(parentEv.odds[pk], cornersEv.odds[pk]);
+              if (this.activeEventId === parentEv.eventId && this.liveOdds[pk]) {
+                this._mergeCornersIntoPeriodOdds(this.liveOdds[pk], cornersEv.odds[pk]);
+              }
+            }
+          }
+        }
+
+        if (this.activeEventId === parentEv.eventId && this.wsFeed) {
+          this.wsFeed.subscribeToEvent(
+            parentEv.competitionId,
+            parentEv.sport,
+            parentEv.eventId,
+            cornersEv.eventId,
+            cornersEv.competitionId || parentEv.competitionId
+          );
+        }
+        break;
+      }
+    }
+  }
+
+  /**
+   * Copies corner ITB1, ITB2, and Total lines from a source odds object (either inline corners or a companion Corners event)
+   * into a target period odds object.
+   * @param {Object} targetPeriodOdds
+   * @param {Object} sourceOdds
+   */
+  _mergeCornersIntoPeriodOdds(targetPeriodOdds, sourceOdds) {
+    if (!targetPeriodOdds || !sourceOdds) return;
+
+    const hasInlineTotal = (sourceOdds.cornersTotalLines && sourceOdds.cornersTotalLines.length > 0) || sourceOdds.cornersTotalOver > 0;
+    const hasInlineItb1 = (sourceOdds.cornersItb1Lines && sourceOdds.cornersItb1Lines.length > 0) || sourceOdds.cornersItb1Over > 0;
+    const hasInlineItb2 = (sourceOdds.cornersItb2Lines && sourceOdds.cornersItb2Lines.length > 0) || sourceOdds.cornersItb2Over > 0;
+
+    const cTotalLines = (sourceOdds.cornersTotalLines && sourceOdds.cornersTotalLines.length > 0)
+      ? sourceOdds.cornersTotalLines
+      : (sourceOdds.totalLines || []);
+    const cItb1Lines = (sourceOdds.cornersItb1Lines && sourceOdds.cornersItb1Lines.length > 0)
+      ? sourceOdds.cornersItb1Lines
+      : (sourceOdds.itb1Lines || []);
+    const cItb2Lines = (sourceOdds.cornersItb2Lines && sourceOdds.cornersItb2Lines.length > 0)
+      ? sourceOdds.cornersItb2Lines
+      : (sourceOdds.itb2Lines || []);
+
+    if (cTotalLines.length > 0 || sourceOdds.cornersTotalOver > 0 || sourceOdds.totalOver > 0) {
+      targetPeriodOdds.cornersTotalLines = cTotalLines;
+      targetPeriodOdds.cornersTotalOver = sourceOdds.cornersTotalOver || sourceOdds.totalOver || 0;
+      targetPeriodOdds.cornersTotalUnder = sourceOdds.cornersTotalUnder || sourceOdds.totalUnder || 0;
+      targetPeriodOdds.cornersTotalLine = (hasInlineTotal ? sourceOdds.cornersTotalLine : sourceOdds.totalLine) || targetPeriodOdds.cornersTotalLine || '9.5';
+      targetPeriodOdds.rawCornersTotalLineIndex = (hasInlineTotal ? sourceOdds.rawCornersTotalLineIndex : sourceOdds.rawTotalLineIndex) ?? targetPeriodOdds.rawCornersTotalLineIndex ?? 38;
+    }
+
+    if (cItb1Lines.length > 0 || sourceOdds.cornersItb1Over > 0 || sourceOdds.itb1Over > 0) {
+      targetPeriodOdds.cornersItb1Lines = cItb1Lines;
+      targetPeriodOdds.cornersItb1Over = sourceOdds.cornersItb1Over || sourceOdds.itb1Over || 0;
+      targetPeriodOdds.cornersItb1Under = sourceOdds.cornersItb1Under || sourceOdds.itb1Under || 0;
+      targetPeriodOdds.cornersItb1Line = (hasInlineItb1 ? sourceOdds.cornersItb1Line : sourceOdds.itb1Line) || targetPeriodOdds.cornersItb1Line || '4.5';
+      targetPeriodOdds.rawCornersItb1LineIndex = (hasInlineItb1 ? sourceOdds.rawCornersItb1LineIndex : sourceOdds.rawItb1LineIndex) ?? targetPeriodOdds.rawCornersItb1LineIndex ?? 18;
+    }
+
+    if (cItb2Lines.length > 0 || sourceOdds.cornersItb2Over > 0 || sourceOdds.itb2Over > 0) {
+      targetPeriodOdds.cornersItb2Lines = cItb2Lines;
+      targetPeriodOdds.cornersItb2Over = sourceOdds.cornersItb2Over || sourceOdds.itb2Over || 0;
+      targetPeriodOdds.cornersItb2Under = sourceOdds.cornersItb2Under || sourceOdds.itb2Under || 0;
+      targetPeriodOdds.cornersItb2Line = (hasInlineItb2 ? sourceOdds.cornersItb2Line : sourceOdds.itb2Line) || targetPeriodOdds.cornersItb2Line || '4.5';
+      targetPeriodOdds.rawCornersItb2LineIndex = (hasInlineItb2 ? sourceOdds.rawCornersItb2LineIndex : sourceOdds.rawItb2LineIndex) ?? targetPeriodOdds.rawCornersItb2LineIndex ?? 18;
+    }
+  }
+
+  /**
    * Updates match metadata from WebSocket event frame.
    * @param {Object} data
    */
@@ -831,6 +1104,7 @@ export class StateManager extends EventEmitter {
     }
 
     this.eventsMap.set(eventId, updated);
+    this._linkCornersEvent(updated);
 
     if (data.score) {
       const incomingScore = {
@@ -978,6 +1252,18 @@ export class StateManager extends EventEmitter {
     const defTotalIdx = isHockey ? (isHt ? 6 : 22) : (isHt ? 2 : 10);
     const defItbLine = isHockey ? (isHt ? '0.5' : '2.5') : (isHt ? '0.5' : '1.5');
     const defItbIdx = isHockey ? (isHt ? 2 : 10) : (isHt ? 2 : 6);
+    const defCornersTotalLine = isHt ? '4.5' : '9.5';
+    const defCornersTotalIdx = isHt ? 18 : 38;
+    const defCornersItbLine = isHt ? '1.5' : '4.5';
+    const defCornersItbIdx = isHt ? 6 : 18;
+
+    const isCornersEvent = Boolean(
+      event?.isCorners ||
+      event?.eventType === 'corners' ||
+      String(sport || '').includes('corn') ||
+      sport === 'fb_c' ||
+      sport === 'fb_c_ht'
+    );
 
     if (event) {
       if (isHockey && data.hockeyPeriod && !event.hockeyPeriod) {
@@ -1011,7 +1297,22 @@ export class StateManager extends EventEmitter {
           itb2Under: updatedMarkets.itb2 ? (odds.itb2Under || 0) : (prevPeriodOdds.itb2Under || 0),
           itb2Line: odds.itb2Line || prevPeriodOdds.itb2Line || defItbLine,
           rawItb2LineIndex: odds.rawItb2LineIndex ?? prevPeriodOdds.rawItb2LineIndex ?? defItbIdx,
-          itb2Lines: (odds.itb2Lines && odds.itb2Lines.length > 0) ? odds.itb2Lines : (prevPeriodOdds.itb2Lines || [])
+          itb2Lines: (odds.itb2Lines && odds.itb2Lines.length > 0) ? odds.itb2Lines : (prevPeriodOdds.itb2Lines || []),
+          cornersTotalOver: updatedMarkets.cornersAhou ? (odds.cornersTotalOver || 0) : (prevPeriodOdds.cornersTotalOver || 0),
+          cornersTotalUnder: updatedMarkets.cornersAhou ? (odds.cornersTotalUnder || 0) : (prevPeriodOdds.cornersTotalUnder || 0),
+          cornersTotalLine: odds.cornersTotalLine || prevPeriodOdds.cornersTotalLine || defCornersTotalLine,
+          rawCornersTotalLineIndex: odds.rawCornersTotalLineIndex ?? prevPeriodOdds.rawCornersTotalLineIndex ?? defCornersTotalIdx,
+          cornersTotalLines: (odds.cornersTotalLines && odds.cornersTotalLines.length > 0) ? odds.cornersTotalLines : (prevPeriodOdds.cornersTotalLines || []),
+          cornersItb1Over: updatedMarkets.cornersItb1 ? (odds.cornersItb1Over || 0) : (prevPeriodOdds.cornersItb1Over || 0),
+          cornersItb1Under: updatedMarkets.cornersItb1 ? (odds.cornersItb1Under || 0) : (prevPeriodOdds.cornersItb1Under || 0),
+          cornersItb1Line: odds.cornersItb1Line || prevPeriodOdds.cornersItb1Line || defCornersItbLine,
+          rawCornersItb1LineIndex: odds.rawCornersItb1LineIndex ?? prevPeriodOdds.rawCornersItb1LineIndex ?? defCornersItbIdx,
+          cornersItb1Lines: (odds.cornersItb1Lines && odds.cornersItb1Lines.length > 0) ? odds.cornersItb1Lines : (prevPeriodOdds.cornersItb1Lines || []),
+          cornersItb2Over: updatedMarkets.cornersItb2 ? (odds.cornersItb2Over || 0) : (prevPeriodOdds.cornersItb2Over || 0),
+          cornersItb2Under: updatedMarkets.cornersItb2 ? (odds.cornersItb2Under || 0) : (prevPeriodOdds.cornersItb2Under || 0),
+          cornersItb2Line: odds.cornersItb2Line || prevPeriodOdds.cornersItb2Line || defCornersItbLine,
+          rawCornersItb2LineIndex: odds.rawCornersItb2LineIndex ?? prevPeriodOdds.rawCornersItb2LineIndex ?? defCornersItbIdx,
+          cornersItb2Lines: (odds.cornersItb2Lines && odds.cornersItb2Lines.length > 0) ? odds.cornersItb2Lines : (prevPeriodOdds.cornersItb2Lines || [])
         };
       } else {
         // Fallback for partial/synthetic updates (e.g. tests)
@@ -1033,9 +1334,42 @@ export class StateManager extends EventEmitter {
           itb2Under: (odds.itb2Under && odds.itb2Under > 0) ? odds.itb2Under : (prevPeriodOdds.itb2Under || 0),
           itb2Line: odds.itb2Line || prevPeriodOdds.itb2Line || defItbLine,
           rawItb2LineIndex: odds.rawItb2LineIndex ?? prevPeriodOdds.rawItb2LineIndex ?? defItbIdx,
-          itb2Lines: (odds.itb2Lines && odds.itb2Lines.length > 0) ? odds.itb2Lines : (prevPeriodOdds.itb2Lines || [])
+          itb2Lines: (odds.itb2Lines && odds.itb2Lines.length > 0) ? odds.itb2Lines : (prevPeriodOdds.itb2Lines || []),
+          cornersTotalOver: (odds.cornersTotalOver && odds.cornersTotalOver > 0) ? odds.cornersTotalOver : (prevPeriodOdds.cornersTotalOver || 0),
+          cornersTotalUnder: (odds.cornersTotalUnder && odds.cornersTotalUnder > 0) ? odds.cornersTotalUnder : (prevPeriodOdds.cornersTotalUnder || 0),
+          cornersTotalLine: odds.cornersTotalLine || prevPeriodOdds.cornersTotalLine || defCornersTotalLine,
+          rawCornersTotalLineIndex: odds.rawCornersTotalLineIndex ?? prevPeriodOdds.rawCornersTotalLineIndex ?? defCornersTotalIdx,
+          cornersTotalLines: (odds.cornersTotalLines && odds.cornersTotalLines.length > 0) ? odds.cornersTotalLines : (prevPeriodOdds.cornersTotalLines || []),
+          cornersItb1Over: (odds.cornersItb1Over && odds.cornersItb1Over > 0) ? odds.cornersItb1Over : (prevPeriodOdds.cornersItb1Over || 0),
+          cornersItb1Under: (odds.cornersItb1Under && odds.cornersItb1Under > 0) ? odds.cornersItb1Under : (prevPeriodOdds.cornersItb1Under || 0),
+          cornersItb1Line: odds.cornersItb1Line || prevPeriodOdds.cornersItb1Line || defCornersItbLine,
+          rawCornersItb1LineIndex: odds.rawCornersItb1LineIndex ?? prevPeriodOdds.rawCornersItb1LineIndex ?? defCornersItbIdx,
+          cornersItb1Lines: (odds.cornersItb1Lines && odds.cornersItb1Lines.length > 0) ? odds.cornersItb1Lines : (prevPeriodOdds.cornersItb1Lines || []),
+          cornersItb2Over: (odds.cornersItb2Over && odds.cornersItb2Over > 0) ? odds.cornersItb2Over : (prevPeriodOdds.cornersItb2Over || 0),
+          cornersItb2Under: (odds.cornersItb2Under && odds.cornersItb2Under > 0) ? odds.cornersItb2Under : (prevPeriodOdds.cornersItb2Under || 0),
+          cornersItb2Line: odds.cornersItb2Line || prevPeriodOdds.cornersItb2Line || defCornersItbLine,
+          rawCornersItb2LineIndex: odds.rawCornersItb2LineIndex ?? prevPeriodOdds.rawCornersItb2LineIndex ?? defCornersItbIdx,
+          cornersItb2Lines: (odds.cornersItb2Lines && odds.cornersItb2Lines.length > 0) ? odds.cornersItb2Lines : (prevPeriodOdds.cornersItb2Lines || [])
         };
       }
+
+      if (isCornersEvent) {
+        // In a companion (Corners) event, standard ahou / tahou,h / tahou,a ARE the corner markets
+        this._mergeCornersIntoPeriodOdds(event.odds[targetPeriod], event.odds[targetPeriod]);
+        if (event.parentEventId) {
+          const parentEv = this.eventsMap.get(event.parentEventId);
+          if (parentEv) {
+            if (!parentEv.odds) parentEv.odds = { ft: {}, ht: {} };
+            if (!parentEv.odds[targetPeriod]) parentEv.odds[targetPeriod] = {};
+            this._mergeCornersIntoPeriodOdds(parentEv.odds[targetPeriod], event.odds[targetPeriod]);
+          }
+          if (this.activeEventId === event.parentEventId) {
+            this._mergeCornersIntoPeriodOdds(this.liveOdds[targetPeriod], event.odds[targetPeriod]);
+            this.emit('state_updated');
+          }
+        }
+      }
+
       event.lastUpdate = Date.now();
       const evScore = isHt ? (event.htScore || { home: 0, away: 0 }) : (event.ftScore || event.score || { home: 0, away: 0 });
       this._reconcileOddsWithScore(eventId, targetPeriod, evScore);
@@ -1071,6 +1405,27 @@ export class StateManager extends EventEmitter {
           if (odds.itb2Line) pOdds.itb2Line = odds.itb2Line;
           if (odds.rawItb2LineIndex != null) pOdds.rawItb2LineIndex = odds.rawItb2LineIndex;
         }
+        if (updatedMarkets.cornersAhou) {
+          if (odds.cornersTotalLines && odds.cornersTotalLines.length > 0) pOdds.cornersTotalLines = odds.cornersTotalLines;
+          pOdds.cornersTotalOver = odds.cornersTotalOver || 0;
+          pOdds.cornersTotalUnder = odds.cornersTotalUnder || 0;
+          if (odds.cornersTotalLine) pOdds.cornersTotalLine = odds.cornersTotalLine;
+          if (odds.rawCornersTotalLineIndex != null) pOdds.rawCornersTotalLineIndex = odds.rawCornersTotalLineIndex;
+        }
+        if (updatedMarkets.cornersItb1) {
+          if (odds.cornersItb1Lines && odds.cornersItb1Lines.length > 0) pOdds.cornersItb1Lines = odds.cornersItb1Lines;
+          pOdds.cornersItb1Over = odds.cornersItb1Over || 0;
+          pOdds.cornersItb1Under = odds.cornersItb1Under || 0;
+          if (odds.cornersItb1Line) pOdds.cornersItb1Line = odds.cornersItb1Line;
+          if (odds.rawCornersItb1LineIndex != null) pOdds.rawCornersItb1LineIndex = odds.rawCornersItb1LineIndex;
+        }
+        if (updatedMarkets.cornersItb2) {
+          if (odds.cornersItb2Lines && odds.cornersItb2Lines.length > 0) pOdds.cornersItb2Lines = odds.cornersItb2Lines;
+          pOdds.cornersItb2Over = odds.cornersItb2Over || 0;
+          pOdds.cornersItb2Under = odds.cornersItb2Under || 0;
+          if (odds.cornersItb2Line) pOdds.cornersItb2Line = odds.cornersItb2Line;
+          if (odds.rawCornersItb2LineIndex != null) pOdds.rawCornersItb2LineIndex = odds.rawCornersItb2LineIndex;
+        }
       } else {
         if (odds.totalLines && odds.totalLines.length > 0) pOdds.totalLines = odds.totalLines;
         if (odds.totalOver > 0) pOdds.totalOver = odds.totalOver;
@@ -1092,6 +1447,28 @@ export class StateManager extends EventEmitter {
         if (odds.itb2Under > 0) pOdds.itb2Under = odds.itb2Under;
         if (odds.itb2Line) pOdds.itb2Line = odds.itb2Line;
         if (odds.rawItb2LineIndex != null) pOdds.rawItb2LineIndex = odds.rawItb2LineIndex;
+
+        if (odds.cornersTotalLines && odds.cornersTotalLines.length > 0) pOdds.cornersTotalLines = odds.cornersTotalLines;
+        if (odds.cornersTotalOver > 0) pOdds.cornersTotalOver = odds.cornersTotalOver;
+        if (odds.cornersTotalUnder > 0) pOdds.cornersTotalUnder = odds.cornersTotalUnder;
+        if (odds.cornersTotalLine) pOdds.cornersTotalLine = odds.cornersTotalLine;
+        if (odds.rawCornersTotalLineIndex != null) pOdds.rawCornersTotalLineIndex = odds.rawCornersTotalLineIndex;
+
+        if (odds.cornersItb1Lines && odds.cornersItb1Lines.length > 0) pOdds.cornersItb1Lines = odds.cornersItb1Lines;
+        if (odds.cornersItb1Over > 0) pOdds.cornersItb1Over = odds.cornersItb1Over;
+        if (odds.cornersItb1Under > 0) pOdds.cornersItb1Under = odds.cornersItb1Under;
+        if (odds.cornersItb1Line) pOdds.cornersItb1Line = odds.cornersItb1Line;
+        if (odds.rawCornersItb1LineIndex != null) pOdds.rawCornersItb1LineIndex = odds.rawCornersItb1LineIndex;
+
+        if (odds.cornersItb2Lines && odds.cornersItb2Lines.length > 0) pOdds.cornersItb2Lines = odds.cornersItb2Lines;
+        if (odds.cornersItb2Over > 0) pOdds.cornersItb2Over = odds.cornersItb2Over;
+        if (odds.cornersItb2Under > 0) pOdds.cornersItb2Under = odds.cornersItb2Under;
+        if (odds.cornersItb2Line) pOdds.cornersItb2Line = odds.cornersItb2Line;
+        if (odds.rawCornersItb2LineIndex != null) pOdds.rawCornersItb2LineIndex = odds.rawCornersItb2LineIndex;
+      }
+
+      if (isCornersEvent) {
+        this._mergeCornersIntoPeriodOdds(pOdds, pOdds);
       }
 
       // Enforce score-based minimum line constraints (never keep a line <= goals scored)
@@ -1289,11 +1666,19 @@ export class StateManager extends EventEmitter {
 
   /**
    * Returns the maximum stake limit for the target outcome or account.
+   * Respects availableBalance when accountBalance and open stakes / explicit available balance are present.
    * @param {'OVER' | 'HOME' | 'AWAY' | 'HT_OVER' | 'HT_HOME' | 'HT_AWAY'} [targetKey]
    * @returns {number}
    */
   getMaxStakeLimit(targetKey = null) {
-    let limit = this.accountBalance > 0 ? this.accountBalance : 2000.0;
+    let limit = 2000.0;
+    if (this.accountBalance > 0) {
+      if (this._explicitAvailableBalance !== null || this._wsOpenStakes !== null || this.openStakes > 0 || this.availableBalance > 0) {
+        limit = this.availableBalance;
+      } else {
+        limit = this.accountBalance;
+      }
+    }
     if (targetKey) {
       const slip = this.getArmedBetslip(targetKey);
       if (slip && typeof slip.maxStake === 'number' && slip.maxStake > 0) {
@@ -1638,17 +2023,43 @@ export class StateManager extends EventEmitter {
         pOdds.itb2Over = found.totalOver || 0;
         pOdds.itb2Under = found.totalUnder || 0;
       }
+    } else if (cleanKey === 'CORNERS_OVER' || cleanKey === 'HT_CORNERS_OVER') {
+      pOdds.cornersTotalLine = String(line);
+      pOdds.rawCornersTotalLineIndex = rawIdx;
+      const found = (pOdds.cornersTotalLines || []).find(x => x.totalLine === String(line));
+      if (found) {
+        pOdds.cornersTotalOver = found.totalOver || 0;
+        pOdds.cornersTotalUnder = found.totalUnder || 0;
+      }
+    } else if (cleanKey === 'CORNERS_ITB1' || cleanKey === 'HT_CORNERS_ITB1') {
+      pOdds.cornersItb1Line = String(line);
+      pOdds.rawCornersItb1LineIndex = rawIdx;
+      const found = (pOdds.cornersItb1Lines || []).find(x => x.totalLine === String(line));
+      if (found) {
+        pOdds.cornersItb1Over = found.totalOver || 0;
+        pOdds.cornersItb1Under = found.totalUnder || 0;
+      }
+    } else if (cleanKey === 'CORNERS_ITB2' || cleanKey === 'HT_CORNERS_ITB2') {
+      pOdds.cornersItb2Line = String(line);
+      pOdds.rawCornersItb2LineIndex = rawIdx;
+      const found = (pOdds.cornersItb2Lines || []).find(x => x.totalLine === String(line));
+      if (found) {
+        pOdds.cornersItb2Over = found.totalOver || 0;
+        pOdds.cornersItb2Under = found.totalUnder || 0;
+      }
     }
 
     logger.info('StateManager', `User line override applied for ${cleanKey}: ${line} (rawIndex: ${rawIdx}). Re-arming...`);
-    await this.armTarget(cleanKey, true);
+    if (!cleanKey.includes('CORNERS')) {
+      await this.armTarget(cleanKey, true);
+    }
     this.emit('state_updated');
   }
 
   /**
    * Cycles to next or previous available line for current combat total.
    * @param {number} direction (+1 for higher line, -1 for lower line)
-   * @param {'OVER' | 'ITB1' | 'ITB2'} [slotType='OVER']
+   * @param {'OVER' | 'ITB1' | 'ITB2' | 'CORNERS_OVER' | 'CORNERS_ITB1' | 'CORNERS_ITB2'} [slotType='OVER']
    */
   async cycleTotalLine(direction = 1, slotType = 'OVER') {
     if (!this.activeEventId) return;
@@ -1668,6 +2079,18 @@ export class StateManager extends EventEmitter {
       targetKey = isHt ? 'HT_ITB2' : 'ITB2';
       lines = pOdds.itb2Lines;
       currentLine = pOdds.itb2Line || (isHt ? '0.5' : '1.5');
+    } else if (slotType === 'CORNERS_ITB1') {
+      targetKey = isHt ? 'HT_CORNERS_ITB1' : 'CORNERS_ITB1';
+      lines = pOdds.cornersItb1Lines || [];
+      currentLine = pOdds.cornersItb1Line || (isHt ? '1.5' : '4.5');
+    } else if (slotType === 'CORNERS_ITB2') {
+      targetKey = isHt ? 'HT_CORNERS_ITB2' : 'CORNERS_ITB2';
+      lines = pOdds.cornersItb2Lines || [];
+      currentLine = pOdds.cornersItb2Line || (isHt ? '1.5' : '4.5');
+    } else if (slotType === 'CORNERS_OVER') {
+      targetKey = isHt ? 'HT_CORNERS_OVER' : 'CORNERS_OVER';
+      lines = pOdds.cornersTotalLines || [];
+      currentLine = pOdds.cornersTotalLine || (isHt ? '4.5' : '9.5');
     } else {
       targetKey = isHt ? 'HT_OVER' : 'OVER';
       lines = pOdds.totalLines;
