@@ -219,10 +219,9 @@ export class MollybetAdapter extends BaseAdapter {
           const val = parseFloat(matchInfo.cornersItb1Line || (matchInfo.isCornersEvent ? matchInfo.itb1Line : '') || defLine);
           lineIndex = Math.round((Number.isNaN(val) ? parseFloat(defLine) : val) * 4);
         }
-        const marketType = matchInfo.isCornersEvent ? 'tahover,h' : 'ctahover,h';
-        return isLive
-          ? `for,ir,${h},${a},${marketType},${lineIndex}`
-          : `for,${marketType},${lineIndex}`;
+        return (isLive && (h > 0 || a > 0 || matchInfo.isCornersEvent))
+          ? `for,ir,${h},${a},tahover,h,${lineIndex}`
+          : `for,tahover,h,${lineIndex}`;
       }
       case 'CORNERS_ITB2':
       case 'HT_CORNERS_ITB2': {
@@ -236,10 +235,9 @@ export class MollybetAdapter extends BaseAdapter {
           const val = parseFloat(matchInfo.cornersItb2Line || (matchInfo.isCornersEvent ? matchInfo.itb2Line : '') || defLine);
           lineIndex = Math.round((Number.isNaN(val) ? parseFloat(defLine) : val) * 4);
         }
-        const marketType = matchInfo.isCornersEvent ? 'tahover,a' : 'ctahover,a';
-        return isLive
-          ? `for,ir,${h},${a},${marketType},${lineIndex}`
-          : `for,${marketType},${lineIndex}`;
+        return (isLive && (h > 0 || a > 0 || matchInfo.isCornersEvent))
+          ? `for,ir,${h},${a},tahover,a,${lineIndex}`
+          : `for,tahover,a,${lineIndex}`;
       }
       default:
         throw new Error(`Unsupported targetKey: ${targetKey}`);
@@ -249,14 +247,14 @@ export class MollybetAdapter extends BaseAdapter {
   /**
    * Pre-arms a betslip at Mollybet (POST /v1/betslips/).
    *
-   * @param {'OVER' | 'HOME' | 'AWAY' | 'HT_OVER' | 'HT_HOME' | 'HT_AWAY'} targetKey
+   * @param {'OVER' | 'HOME' | 'DRAW' | 'AWAY' | 'ITB1' | 'ITB2' | 'CORNERS_ITB1' | 'CORNERS_ITB2' | 'HT_OVER' | 'HT_HOME' | 'HT_DRAW' | 'HT_AWAY' | 'HT_ITB1' | 'HT_ITB2' | 'HT_CORNERS_ITB1' | 'HT_CORNERS_ITB2'} targetKey
    * @param {Object} matchInfo
    * @param {string} matchInfo.eventId
    * @param {{ home: number, away: number }} matchInfo.liveScore
    * @param {string} [matchInfo.totalLine]
    * @param {number} [matchInfo.rawTotalLineIndex]
    * @param {string} [matchInfo.period] - 'FT' or 'HT'
-   * @param {string} [matchInfo.sport] - 'fb', 'fb_ht', or 'ih'
+   * @param {string} [matchInfo.sport] - 'fb', 'fb_ht', 'fb_corn', 'fb_corn_ht', or 'ih'
    * @param {number} [matchInfo.hockeyPeriod] - 1, 2, or 3
    * @param {string} [matchInfo.betType]
    * @returns {Promise<{ betslipId: string, expiryTs: number, price: number | null, maxStake: number | null, betType: string, targetKey: string, rttMs: number }>}
@@ -269,8 +267,13 @@ export class MollybetAdapter extends BaseAdapter {
     const betType = this.resolveBetType(targetKey, matchInfo);
     const score = matchInfo.liveScore || { home: 0, away: 0 };
     const isHockey = matchInfo.sport === 'ih';
-    const isHt = targetKey.startsWith('HT_') || matchInfo.period === 'HT' || matchInfo.sport === 'fb_ht';
-    const sport = isHockey ? 'ih' : (isHt ? 'fb_ht' : 'fb');
+    const isHt = targetKey.startsWith('HT_') || matchInfo.period === 'HT' || matchInfo.sport === 'fb_ht' || matchInfo.sport === 'fb_corn_ht';
+    const isCornersTarget = targetKey === 'CORNERS_ITB1' || targetKey === 'CORNERS_ITB2' || targetKey === 'HT_CORNERS_ITB1' || targetKey === 'HT_CORNERS_ITB2';
+    const sport = isHockey
+      ? 'ih'
+      : (isCornersTarget && !matchInfo.isCompanionCornersEvent
+          ? (isHt ? 'fb_corn_ht' : 'fb_corn')
+          : (isHt ? 'fb_ht' : 'fb'));
 
     const payload = {
       sport,

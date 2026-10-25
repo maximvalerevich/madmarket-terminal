@@ -614,7 +614,7 @@ export class StateManager extends EventEmitter {
     const slipId = slipData.betslip_id;
     const allowed = this.getAllowedBookies();
 
-    for (const key of ['OVER', 'HOME', 'AWAY', 'ITB1', 'ITB2']) {
+    for (const key of ['OVER', 'HOME', 'DRAW', 'AWAY', 'ITB1', 'ITB2', 'CORNERS_ITB1', 'CORNERS_ITB2']) {
       const slip = this.armedBetslips[key];
       if (slip && slip.betslipId === slipId) {
         if (Array.isArray(slipData.bookies_with_offers) && slipData.bookies_with_offers.length > 0) {
@@ -642,13 +642,19 @@ export class StateManager extends EventEmitter {
             const pOdds = isSlipHt ? this.liveOdds.ht : this.liveOdds.ft;
             if (key === 'OVER') pOdds.totalOver = bestPrice;
             if (key === 'HOME') pOdds.winHome = bestPrice;
+            if (key === 'DRAW') pOdds.winDraw = bestPrice;
             if (key === 'AWAY') pOdds.winAway = bestPrice;
             if (key === 'ITB1') pOdds.itb1Over = bestPrice;
             if (key === 'ITB2') pOdds.itb2Over = bestPrice;
+            if (key === 'CORNERS_ITB1') pOdds.cornersItb1Over = bestPrice;
+            if (key === 'CORNERS_ITB2') pOdds.cornersItb2Over = bestPrice;
           }
           if (maxLimit > 0) {
             slip.maxStake = maxLimit;
             logger.info('StateManager', `Updated max stake limit for ${key} (${slipId.slice(-8)}): €${maxLimit}${bestPrice > 0 ? `, price: ${bestPrice}` : ''}`);
+          }
+          if (bestPrice > 0 || maxLimit > 0) {
+            this.emit('slip_quote_updated', { key, targetKey: slip.targetKey || key, betslipId: slipId, price: bestPrice, maxStake: slip.maxStake });
             this.emit('state_updated');
           }
         }
@@ -673,7 +679,7 @@ export class StateManager extends EventEmitter {
       return;
     }
 
-    for (const key of ['OVER', 'HOME', 'AWAY', 'ITB1', 'ITB2']) {
+    for (const key of ['OVER', 'HOME', 'DRAW', 'AWAY', 'ITB1', 'ITB2', 'CORNERS_ITB1', 'CORNERS_ITB2']) {
       const slip = this.armedBetslips[key];
       if (slip && slip.betslipId === slipId) {
         let bestPrice = 0;
@@ -702,9 +708,12 @@ export class StateManager extends EventEmitter {
           const pOdds = isSlipHt ? this.liveOdds.ht : this.liveOdds.ft;
           if (key === 'OVER') pOdds.totalOver = bestPrice;
           if (key === 'HOME') pOdds.winHome = bestPrice;
+          if (key === 'DRAW') pOdds.winDraw = bestPrice;
           if (key === 'AWAY') pOdds.winAway = bestPrice;
           if (key === 'ITB1') pOdds.itb1Over = bestPrice;
           if (key === 'ITB2') pOdds.itb2Over = bestPrice;
+          if (key === 'CORNERS_ITB1') pOdds.cornersItb1Over = bestPrice;
+          if (key === 'CORNERS_ITB2') pOdds.cornersItb2Over = bestPrice;
         }
 
         if (maxLimit > 0) {
@@ -713,6 +722,7 @@ export class StateManager extends EventEmitter {
 
         if (bestPrice > 1.0) {
           logger.info('StateManager', `PMM quote for ${key} [${slip.targetKey || key}] (${slipId.slice(-8)}): кэф ${bestPrice}, лимит €${Math.floor(maxLimit || 0)} (${bookie || 'pin88'})`);
+          this.emit('slip_quote_updated', { key, targetKey: slip.targetKey || key, betslipId: slipId, price: bestPrice, maxStake: slip.maxStake });
           this.emit('state_updated');
         }
       }
@@ -727,7 +737,7 @@ export class StateManager extends EventEmitter {
   handleBetslipClosed(closedData) {
     if (!closedData || !closedData.betslip_id) return;
     const slipId = closedData.betslip_id;
-    for (const key of ['OVER', 'HOME', 'AWAY', 'ITB1', 'ITB2']) {
+    for (const key of ['OVER', 'HOME', 'DRAW', 'AWAY', 'ITB1', 'ITB2', 'CORNERS_ITB1', 'CORNERS_ITB2']) {
       const slip = this.armedBetslips[key];
       if (slip && slip.betslipId === slipId) {
         logger.warn('StateManager', `Betslip ${slipId.slice(-8)} closed by server (${closedData.close_reason || 'closed'}). Re-arming immediately!`);
@@ -747,7 +757,7 @@ export class StateManager extends EventEmitter {
 
     // 1. Release previous active slips from Mollybet to keep total open slips <= 3
     if (this.activeEventId && this.adapter) {
-      for (const key of ['OVER', 'HOME', 'AWAY', 'ITB1', 'ITB2']) {
+      for (const key of ['OVER', 'HOME', 'DRAW', 'AWAY', 'ITB1', 'ITB2', 'CORNERS_ITB1', 'CORNERS_ITB2']) {
         const slip = this.armedBetslips[key];
         if (slip && slip.betslipId) {
           this.adapter.deleteBetslip(slip.betslipId).catch(() => {});
@@ -959,6 +969,88 @@ export class StateManager extends EventEmitter {
   }
 
   /**
+   * Ensures corner total and individual corner total lines for an event and period
+   * are strictly greater than the already-taken corners.
+   * @param {string} eventId
+   * @param {'ft' | 'ht'} periodKey
+   * @param {{ home: number, away: number }} cornersScore
+   */
+  _reconcileCornersOddsWithScore(eventId, periodKey, cornersScore) {
+    if (!eventId || !cornersScore) return;
+    const home = Number(cornersScore.home) || 0;
+    const away = Number(cornersScore.away) || 0;
+    const totalCorners = home + away;
+    const isHt = periodKey === 'ht';
+
+    const cOverKey = isHt ? 'HT_CORNERS_OVER' : 'CORNERS_OVER';
+    const cItb1Key = isHt ? 'HT_CORNERS_ITB1' : 'CORNERS_ITB1';
+    const cItb2Key = isHt ? 'HT_CORNERS_ITB2' : 'CORNERS_ITB2';
+
+    const userCOver = this.getUserLineOverride(cOverKey, eventId);
+    if (userCOver && parseFloat(userCOver.totalLine) <= totalCorners) {
+      this.userLineOverrides.delete(`${eventId}:${cOverKey}`);
+    }
+    const userCItb1 = this.getUserLineOverride(cItb1Key, eventId);
+    if (userCItb1 && parseFloat(userCItb1.totalLine) <= home) {
+      this.userLineOverrides.delete(`${eventId}:${cItb1Key}`);
+    }
+    const userCItb2 = this.getUserLineOverride(cItb2Key, eventId);
+    if (userCItb2 && parseFloat(userCItb2.totalLine) <= away) {
+      this.userLineOverrides.delete(`${eventId}:${cItb2Key}`);
+    }
+
+    const advanceCornerOdds = (oddsObj) => {
+      if (!oddsObj || typeof oddsObj !== 'object') return;
+
+      const filterLinesIfValid = (arr, minC) => {
+        if (!Array.isArray(arr)) return [];
+        const higher = arr.filter(x => parseFloat(x.totalLine) > minC);
+        return higher.length > 0 ? higher : arr;
+      };
+
+      if (Array.isArray(oddsObj.cornersTotalLines) && oddsObj.cornersTotalLines.length > 0) {
+        oddsObj.cornersTotalLines = filterLinesIfValid(oddsObj.cornersTotalLines, totalCorners);
+      }
+      if (Array.isArray(oddsObj.cornersItb1Lines) && oddsObj.cornersItb1Lines.length > 0) {
+        oddsObj.cornersItb1Lines = filterLinesIfValid(oddsObj.cornersItb1Lines, home);
+      }
+      if (Array.isArray(oddsObj.cornersItb2Lines) && oddsObj.cornersItb2Lines.length > 0) {
+        oddsObj.cornersItb2Lines = filterLinesIfValid(oddsObj.cornersItb2Lines, away);
+      }
+
+      const stepIfObsolete = (lineField, idxField, overField, underField, linesField, minVal) => {
+        const curStr = oddsObj[lineField];
+        if (!curStr) return;
+        const curVal = parseFloat(curStr);
+        if (Number.isNaN(curVal) || curVal > minVal) return;
+
+        const validLines = Array.isArray(oddsObj[linesField]) ? oddsObj[linesField] : [];
+        const nextEntry = validLines.find(x => parseFloat(x.totalLine) > minVal && x.totalOver > 1.0)
+          || validLines.find(x => parseFloat(x.totalLine) > minVal);
+
+        if (nextEntry) {
+          oddsObj[lineField] = nextEntry.totalLine;
+          oddsObj[idxField] = nextEntry.rawTotalLineIndex;
+          oddsObj[overField] = nextEntry.totalOver || 0;
+          oddsObj[underField] = nextEntry.totalUnder || 0;
+        }
+      };
+
+      stepIfObsolete('cornersTotalLine', 'rawCornersTotalLineIndex', 'cornersTotalOver', 'cornersTotalUnder', 'cornersTotalLines', totalCorners);
+      stepIfObsolete('cornersItb1Line', 'rawCornersItb1LineIndex', 'cornersItb1Over', 'cornersItb1Under', 'cornersItb1Lines', home);
+      stepIfObsolete('cornersItb2Line', 'rawCornersItb2LineIndex', 'cornersItb2Over', 'cornersItb2Under', 'cornersItb2Lines', away);
+    };
+
+    const ev = this.eventsMap.get(eventId);
+    if (ev?.odds?.[periodKey]) {
+      advanceCornerOdds(ev.odds[periodKey]);
+    }
+    if (this.activeEventId === eventId && this.liveOdds[periodKey]) {
+      advanceCornerOdds(this.liveOdds[periodKey]);
+    }
+  }
+
+  /**
    * Normalizes a team name by stripping "(Corners)" / "(Угловые)" suffix.
    * @param {string} name
    * @returns {string}
@@ -1098,6 +1190,58 @@ export class StateManager extends EventEmitter {
     const sport = String(data.sport || existing.sport || 'fb');
     const isHockey = sport === 'ih';
     const isHtSport = sport === 'fb_ht';
+    const isCornersSport = Boolean(
+      data.isCornersSport ||
+      sport.includes('corn') ||
+      sport === 'fb_c' ||
+      sport === 'fb_c_ht'
+    );
+
+    if (isCornersSport) {
+      const isCornHt = sport === 'fb_corn_ht' || sport === 'fb_c_ht';
+      const incomingCornersScore = data.score
+        ? { home: Number(data.score.home) || 0, away: Number(data.score.away) || 0 }
+        : null;
+
+      const updatedCornTarget = {
+        ...existing,
+        eventId,
+        sport: existing.sport || 'fb',
+        eventType: existing.eventType || 'normal',
+        isCorners: Boolean(existing.isCorners),
+        competitionId: existing.competitionId || data.competitionId || 0,
+        competition: existing.competition || data.competition || 'Soccer',
+        homeTeam: existing.homeTeam || data.homeTeam || 'Home',
+        awayTeam: existing.awayTeam || data.awayTeam || 'Away',
+        score: existing.score || { home: 0, away: 0 },
+        ftScore: existing.ftScore || existing.score || { home: 0, away: 0 },
+        htScore: existing.htScore,
+        minute: existing.minute || data.minute || '',
+        isLive: Boolean(existing.isLive || data.isLive),
+        startTs: existing.startTs || data.startTs || '',
+        lastUpdate: Date.now()
+      };
+
+      if (incomingCornersScore) {
+        if (isCornHt) {
+          updatedCornTarget.cornersHtScore = incomingCornersScore;
+        } else {
+          updatedCornTarget.cornersFtScore = incomingCornersScore;
+        }
+        if (this.wsFeed && typeof this.wsFeed.syncEventScore === 'function') {
+          this.wsFeed.syncEventScore(eventId, sport, incomingCornersScore);
+        }
+      }
+
+      this.eventsMap.set(eventId, updatedCornTarget);
+      if (incomingCornersScore) {
+        this._reconcileCornersOddsWithScore(eventId, isCornHt ? 'ht' : 'ft', incomingCornersScore);
+      }
+      if (this.activeEventId === eventId) {
+        this.emit('state_updated');
+      }
+      return;
+    }
 
     const updated = {
       ...existing,
@@ -1299,12 +1443,13 @@ export class StateManager extends EventEmitter {
     const defCornersItbLine = isHt ? '1.5' : '4.5';
     const defCornersItbIdx = isHt ? 6 : 18;
 
-    const isCornersEvent = Boolean(
-      event?.isCorners ||
-      event?.eventType === 'corners' ||
+    const isCornersSport = Boolean(
       String(sport || '').includes('corn') ||
       sport === 'fb_c' ||
       sport === 'fb_c_ht'
+    );
+    const isCompanionCornersEvent = Boolean(
+      !isCornersSport && (event?.isCorners || event?.eventType === 'corners')
     );
 
     if (event) {
@@ -1395,8 +1540,8 @@ export class StateManager extends EventEmitter {
         };
       }
 
-      if (isCornersEvent) {
-        // In a companion (Corners) event, standard ahou / tahou,h / tahou,a ARE the corner markets
+      if (isCompanionCornersEvent) {
+        // In a separate companion (Corners) event, standard ahou / tahou,h / tahou,a ARE the corner markets
         this._mergeCornersIntoPeriodOdds(event.odds[targetPeriod], event.odds[targetPeriod]);
         if (event.parentEventId) {
           const parentEv = this.eventsMap.get(event.parentEventId);
@@ -1415,6 +1560,10 @@ export class StateManager extends EventEmitter {
       event.lastUpdate = Date.now();
       const evScore = isHt ? (event.htScore || { home: 0, away: 0 }) : (event.ftScore || event.score || { home: 0, away: 0 });
       this._reconcileOddsWithScore(eventId, targetPeriod, evScore);
+      const evCornScore = isHt ? event.cornersHtScore : event.cornersFtScore;
+      if (evCornScore) {
+        this._reconcileCornersOddsWithScore(eventId, targetPeriod, evCornScore);
+      }
     }
 
     if (this.activeEventId === eventId) {
@@ -1509,13 +1658,17 @@ export class StateManager extends EventEmitter {
         if (odds.rawCornersItb2LineIndex != null) pOdds.rawCornersItb2LineIndex = odds.rawCornersItb2LineIndex;
       }
 
-      if (isCornersEvent) {
+      if (isCompanionCornersEvent) {
         this._mergeCornersIntoPeriodOdds(pOdds, pOdds);
       }
 
       // Enforce score-based minimum line constraints (never keep a line <= goals scored)
       const activePeriodScore = isHt ? this.liveScoreHt : this.liveScoreFt;
       this._reconcileOddsWithScore(eventId, targetPeriod, activePeriodScore);
+      const activeCornScore = isHt ? event?.cornersHtScore : event?.cornersFtScore;
+      if (activeCornScore) {
+        this._reconcileCornersOddsWithScore(eventId, targetPeriod, activeCornScore);
+      }
 
       // Check if user has an explicit manual line override for active period/market
       const overKey = isHt ? 'HT_OVER' : 'OVER';
@@ -1551,6 +1704,42 @@ export class StateManager extends EventEmitter {
         if (matchingLine) {
           pOdds.itb2Over = matchingLine.totalOver || 0;
           pOdds.itb2Under = matchingLine.totalUnder || 0;
+        }
+      }
+
+      const cOverKey = isHt ? 'HT_CORNERS_OVER' : 'CORNERS_OVER';
+      const userCOver = this.getUserLineOverride(cOverKey, this.activeEventId);
+      if (userCOver) {
+        pOdds.cornersTotalLine = userCOver.totalLine;
+        pOdds.rawCornersTotalLineIndex = userCOver.rawTotalLineIndex;
+        const matchingLine = (pOdds.cornersTotalLines || []).find(x => x.totalLine === userCOver.totalLine);
+        if (matchingLine) {
+          pOdds.cornersTotalOver = matchingLine.totalOver || 0;
+          pOdds.cornersTotalUnder = matchingLine.totalUnder || 0;
+        }
+      }
+
+      const cItb1Key = isHt ? 'HT_CORNERS_ITB1' : 'CORNERS_ITB1';
+      const userCItb1 = this.getUserLineOverride(cItb1Key, this.activeEventId);
+      if (userCItb1) {
+        pOdds.cornersItb1Line = userCItb1.totalLine;
+        pOdds.rawCornersItb1LineIndex = userCItb1.rawTotalLineIndex;
+        const matchingLine = (pOdds.cornersItb1Lines || []).find(x => x.totalLine === userCItb1.totalLine);
+        if (matchingLine) {
+          pOdds.cornersItb1Over = matchingLine.totalOver || 0;
+          pOdds.cornersItb1Under = matchingLine.totalUnder || 0;
+        }
+      }
+
+      const cItb2Key = isHt ? 'HT_CORNERS_ITB2' : 'CORNERS_ITB2';
+      const userCItb2 = this.getUserLineOverride(cItb2Key, this.activeEventId);
+      if (userCItb2) {
+        pOdds.cornersItb2Line = userCItb2.totalLine;
+        pOdds.rawCornersItb2LineIndex = userCItb2.rawTotalLineIndex;
+        const matchingLine = (pOdds.cornersItb2Lines || []).find(x => x.totalLine === userCItb2.totalLine);
+        if (matchingLine) {
+          pOdds.cornersItb2Over = matchingLine.totalOver || 0;
+          pOdds.cornersItb2Under = matchingLine.totalUnder || 0;
         }
       }
 
@@ -1838,9 +2027,12 @@ export class StateManager extends EventEmitter {
       const cornersEv = (isCornersSlot && activeEv?.cornersEventId)
         ? this.eventsMap.get(activeEv.cornersEventId)
         : null;
+      const isCompanionCornersEvent = Boolean(cornersEv || activeEv?.isCorners);
       const targetEvId = cornersEv ? cornersEv.eventId : eventId;
-      const targetScore = cornersEv
-        ? (isHt ? (cornersEv.htScore || cornersEv.score || { home: 0, away: 0 }) : (cornersEv.ftScore || cornersEv.score || { home: 0, away: 0 }))
+      const targetScore = isCornersSlot
+        ? (cornersEv
+            ? (isHt ? (cornersEv.htScore || cornersEv.score || { home: 0, away: 0 }) : (cornersEv.ftScore || cornersEv.score || { home: 0, away: 0 }))
+            : (isHt ? (activeEv?.cornersHtScore || activeEv?.cornersFtScore || { home: 0, away: 0 }) : (activeEv?.cornersFtScore || { home: 0, away: 0 })))
         : score;
 
       const matchInfo = {
@@ -1856,9 +2048,14 @@ export class StateManager extends EventEmitter {
         rawCornersItb1LineIndex: odds.rawCornersItb1LineIndex ?? defCornersItbIdx,
         cornersItb2Line: odds.cornersItb2Line || defCornersItbLine,
         rawCornersItb2LineIndex: odds.rawCornersItb2LineIndex ?? defCornersItbIdx,
-        isCornersEvent: Boolean(cornersEv || activeEv?.isCorners),
+        isCornersEvent: isCompanionCornersEvent,
+        isCompanionCornersEvent,
         period: isHt ? 'HT' : 'FT',
-        sport: isHockey ? 'ih' : (isHt ? 'fb_ht' : 'fb'),
+        sport: isHockey
+          ? 'ih'
+          : (isCornersSlot && !isCompanionCornersEvent
+              ? (isHt ? 'fb_corn_ht' : 'fb_corn')
+              : (isHt ? 'fb_ht' : 'fb')),
         hockeyPeriod: isHockey ? hockeyPeriod : undefined,
         isLive: Boolean(activeEv?.isLive || targetScore.home > 0 || targetScore.away > 0)
       };

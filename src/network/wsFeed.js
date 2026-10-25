@@ -283,6 +283,8 @@ export class WsFeed extends BaseFeed {
       if (s.startsWith('fb')) {
         targets.push([compId, 'fb', id]);
         targets.push([compId, 'fb_ht', id]);
+        targets.push([compId, 'fb_corn', id]);
+        targets.push([compId, 'fb_corn_ht', id]);
         if (cId && cId !== id) {
           targets.push([cCompId, 'fb', cId]);
           targets.push([cCompId, 'fb_ht', cId]);
@@ -343,6 +345,8 @@ export class WsFeed extends BaseFeed {
       if (s.startsWith('fb')) {
         targets.push([compId, 'fb', id]);
         targets.push([compId, 'fb_ht', id]);
+        targets.push([compId, 'fb_corn', id]);
+        targets.push([compId, 'fb_corn_ht', id]);
         if (cId && cId !== id) {
           targets.push([cCompId, 'fb', cId]);
           targets.push([cCompId, 'fb_ht', cId]);
@@ -596,12 +600,14 @@ export class WsFeed extends BaseFeed {
       }
     }
 
+    const isCornersSport = sport.includes('corn') || sport === 'fb_c' || sport === 'fb_c_ht';
     const isCorners = Boolean(
-      metadata.event_type === 'corners' ||
-      /\bcorners?\b/i.test(homeTeam) ||
-      /\bcorners?\b/i.test(awayTeam) ||
-      /\bcorners?\b/i.test(competition) ||
-      sport.includes('corn')
+      !isCornersSport && (
+        metadata.event_type === 'corners' ||
+        /\bcorners?\b/i.test(homeTeam) ||
+        /\bcorners?\b/i.test(awayTeam) ||
+        /\bcorners?\b/i.test(competition)
+      )
     );
 
     const eventPayload = {
@@ -609,6 +615,7 @@ export class WsFeed extends BaseFeed {
       sport,
       eventType: metadata.event_type || (isCorners ? 'corners' : 'normal'),
       isCorners,
+      isCornersSport,
       competitionId,
       competition,
       homeTeam,
@@ -652,18 +659,37 @@ export class WsFeed extends BaseFeed {
     if (prev && (prev.home !== home || prev.away !== away)) {
       if (sticky) {
         sticky.totalLine = null;
-        if (prev.home !== home) sticky.itb1Line = null;
-        if (prev.away !== away) sticky.itb2Line = null;
+        sticky.cornersTotalLine = null;
+        if (prev.home !== home) {
+          sticky.itb1Line = null;
+          sticky.cornersItb1Line = null;
+        }
+        if (prev.away !== away) {
+          sticky.itb2Line = null;
+          sticky.cornersItb2Line = null;
+        }
       }
       this.lineSpectrums.delete(`${scopeKey}:ahou`);
-      if (prev.home !== home) this.lineSpectrums.delete(`${scopeKey}:itb1`);
-      if (prev.away !== away) this.lineSpectrums.delete(`${scopeKey}:itb2`);
+      this.lineSpectrums.delete(`${scopeKey}:cahou`);
+      if (prev.home !== home) {
+        this.lineSpectrums.delete(`${scopeKey}:itb1`);
+        this.lineSpectrums.delete(`${scopeKey}:citb1`);
+      }
+      if (prev.away !== away) {
+        this.lineSpectrums.delete(`${scopeKey}:itb2`);
+        this.lineSpectrums.delete(`${scopeKey}:citb2`);
+      }
     }
 
     if (sticky) {
       if (sticky.totalLine && parseFloat(sticky.totalLine) <= total) sticky.totalLine = null;
       if (sticky.itb1Line && parseFloat(sticky.itb1Line) <= home) sticky.itb1Line = null;
       if (sticky.itb2Line && parseFloat(sticky.itb2Line) <= away) sticky.itb2Line = null;
+      if (scopeKey.includes('corn')) {
+        if (sticky.cornersTotalLine && parseFloat(sticky.cornersTotalLine) <= total) sticky.cornersTotalLine = null;
+        if (sticky.cornersItb1Line && parseFloat(sticky.cornersItb1Line) <= home) sticky.cornersItb1Line = null;
+        if (sticky.cornersItb2Line && parseFloat(sticky.cornersItb2Line) <= away) sticky.cornersItb2Line = null;
+      }
     }
 
     const pruneSpectrum = (specKey, minGoalVal) => {
@@ -679,6 +705,11 @@ export class WsFeed extends BaseFeed {
     pruneSpectrum(`${scopeKey}:ahou`, total);
     pruneSpectrum(`${scopeKey}:itb1`, home);
     pruneSpectrum(`${scopeKey}:itb2`, away);
+    if (scopeKey.includes('corn')) {
+      pruneSpectrum(`${scopeKey}:cahou`, total);
+      pruneSpectrum(`${scopeKey}:citb1`, home);
+      pruneSpectrum(`${scopeKey}:citb2`, away);
+    }
   }
 
   /**
@@ -955,9 +986,17 @@ export class WsFeed extends BaseFeed {
       }
     }
 
+    const isCornScope = scopeKey.includes('corn') || scopeKey.endsWith(':fb_c') || scopeKey.endsWith(':fb_c_ht');
+    const isHtCornScope = scopeKey.endsWith('_ht');
+    const defCornTotalLine = isHtCornScope ? '4.5' : '9.5';
+    const defCornItbLine = isHtCornScope ? '1.5' : '4.5';
+    const minCornTotal = isCornScope ? minTotalLine : -1;
+    const minCornItb1 = isCornScope ? minItb1Line : -1;
+    const minCornItb2 = isCornScope ? minItb2Line : -1;
+
     if (marketSlice.hasCornersAhou && marketSlice.rawCornersAhou) {
       const cAhouKey = `${scopeKey}:cahou`;
-      const parsedCAhou = this.parseTotalMarket(marketSlice.rawCornersAhou, '9.5', stickyLines.cornersTotalLine, cAhouKey, 'even_money', -1);
+      const parsedCAhou = this.parseTotalMarket(marketSlice.rawCornersAhou, defCornTotalLine, stickyLines.cornersTotalLine, cAhouKey, 'even_money', minCornTotal);
       parsedOdds.cornersTotalLines = parsedCAhou.allLines || [];
       if (parsedCAhou.totalOver > 0 || parsedCAhou.totalUnder > 0 || parsedCAhou.totalLine) {
         parsedOdds.cornersTotalOver = parsedCAhou.totalOver;
@@ -970,7 +1009,7 @@ export class WsFeed extends BaseFeed {
 
     if (marketSlice.hasCornersTahouH && marketSlice.rawCornersTahouH) {
       const cItb1Key = `${scopeKey}:citb1`;
-      const parsedCTahouH = this.parseTotalMarket(marketSlice.rawCornersTahouH, '4.5', null, cItb1Key, 'lowest', -1);
+      const parsedCTahouH = this.parseTotalMarket(marketSlice.rawCornersTahouH, defCornItbLine, null, cItb1Key, 'lowest', minCornItb1);
       parsedOdds.cornersItb1Lines = parsedCTahouH.allLines || [];
       if (parsedCTahouH.totalOver > 0 || parsedCTahouH.totalUnder > 0 || parsedCTahouH.totalLine) {
         parsedOdds.cornersItb1Over = parsedCTahouH.totalOver;
@@ -983,7 +1022,7 @@ export class WsFeed extends BaseFeed {
 
     if (marketSlice.hasCornersTahouA && marketSlice.rawCornersTahouA) {
       const cItb2Key = `${scopeKey}:citb2`;
-      const parsedCTahouA = this.parseTotalMarket(marketSlice.rawCornersTahouA, '4.5', null, cItb2Key, 'lowest', -1);
+      const parsedCTahouA = this.parseTotalMarket(marketSlice.rawCornersTahouA, defCornItbLine, null, cItb2Key, 'lowest', minCornItb2);
       parsedOdds.cornersItb2Lines = parsedCTahouA.allLines || [];
       if (parsedCTahouA.totalOver > 0 || parsedCTahouA.totalUnder > 0 || parsedCTahouA.totalLine) {
         parsedOdds.cornersItb2Over = parsedCTahouA.totalOver;
@@ -1191,7 +1230,11 @@ export class WsFeed extends BaseFeed {
       markets
     );
 
-    logger.debug('WsFeed', `Odds tick for ${eventId}: O(${parsedOdds.totalLine || '?'})=${parsedOdds.totalOver}, 1=${parsedOdds.winHome}, 2=${parsedOdds.winAway}, ITB1(${parsedOdds.itb1Line || '?'})=${parsedOdds.itb1Over}, ITB2(${parsedOdds.itb2Line || '?'})=${parsedOdds.itb2Over}`);
+    if (isCornersSport) {
+      logger.debug('WsFeed', `[${sport}] Corners tick for ${eventId}: C_O(${parsedOdds.cornersTotalLine || '?'})=${parsedOdds.cornersTotalOver}, C_ITB1(${parsedOdds.cornersItb1Line || '?'})=${parsedOdds.cornersItb1Over}, C_ITB2(${parsedOdds.cornersItb2Line || '?'})=${parsedOdds.cornersItb2Over}`);
+    } else {
+      logger.debug('WsFeed', `[${sport}] Odds tick for ${eventId}: O(${parsedOdds.totalLine || '?'})=${parsedOdds.totalOver}, 1=${parsedOdds.winHome}, X=${parsedOdds.winDraw}, 2=${parsedOdds.winAway}, ITB1(${parsedOdds.itb1Line || '?'})=${parsedOdds.itb1Over}, ITB2(${parsedOdds.itb2Line || '?'})=${parsedOdds.itb2Over}`);
+    }
 
     this.emit('odds_update', {
       eventId,

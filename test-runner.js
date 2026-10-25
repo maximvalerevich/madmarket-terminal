@@ -1907,7 +1907,7 @@ engine.on('log', (log) => logCaptured.push(log));
   assert.equal(adapter.resolveBetType('HT_DRAW', { sport: 'ih', period: 'HT', hockeyPeriod: 2 }), 'for,tperiod,2,wdw,d');
   assert.equal(
     adapter.resolveBetType('CORNERS_ITB1', { cornersItb1Line: '4.5', isLive: true, liveScore: { home: 0, away: 0 } }),
-    'for,ir,0,0,ctahover,h,18'
+    'for,tahover,h,18'
   );
   assert.equal(
     adapter.resolveBetType('CORNERS_ITB2', { cornersItb2Line: '3.5', isCornersEvent: true, isLive: true, liveScore: { home: 2, away: 1 } }),
@@ -1956,6 +1956,135 @@ engine.on('log', (log) => logCaptured.push(log));
 
   smKeys.destroy();
   console.log('✓ HUD hotkeys (3=НИЧЬЯ, 6/7=ИТБ УГЛ, 4/5 removed) & DRAW / CORNERS_ITB execution verified');
+
+  // 47. Test real Mollybet protocol for fb_corn / fb_corn_ht (same eventId as fb) & async PMM quote wait on DRAW / CORNERS_ITB
+  const realCornFeed = new WsFeed(testConfig);
+  const smRealCorn = new StateManager(testConfig);
+  const capturedSlipPayloads = [];
+  const mockRealCornH2 = {
+    request: async (method, path, headers, body) => {
+      if (method === 'POST' && path === '/v1/betslips/') {
+        const p = typeof body === 'string' ? JSON.parse(body) : body;
+        capturedSlipPayloads.push(p);
+        const slipId = `slip_ondemand_${capturedSlipPayloads.length}`;
+        // Simulate real Mollybet behavior: POST /v1/betslips/ returns empty bookies_with_offers,
+        // and ~50ms later WebSocket delivers ["pmm", { betslip_id, bookie: "pin88", price_list: [...] }]
+        setTimeout(() => {
+          realCornFeed.handleMessage(JSON.stringify([
+            'api',
+            {
+              data: [
+                [
+                  'pmm',
+                  {
+                    betslip_id: slipId,
+                    bookie: 'pin88',
+                    status: { code: 'success' },
+                    price_list: [{ effective: { price: p.sport.includes('corn') ? 1.82 : 3.45, max: ['EUR', 300] } }]
+                  }
+                ]
+              ]
+            }
+          ]), false);
+        }, 40);
+        return {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({
+            data: {
+              betslip_id: slipId,
+              expiry_ts: Math.floor(Date.now() / 1000) + 45,
+              bookies_with_offers: []
+            }
+          }),
+          rttMs: 12
+        };
+      }
+      return { status: 200, headers: {}, body: '{}', rttMs: 1 };
+    },
+    isConnected: true,
+    ensureConnected: async () => {}
+  };
+  const realCornAdapter = new MollybetAdapter(testConfig, mockRealCornH2);
+  smRealCorn.setAdapter(realCornAdapter);
+  smRealCorn.setWsFeed(realCornFeed);
+  realCornFeed.isConnected = true;
+  realCornFeed.on('event_update', (ev) => smRealCorn.updateEventMetadata(ev));
+  realCornFeed.on('odds_update', (od) => smRealCorn.updateOdds(od));
+
+  // 1) Main fb match arrives with score 0:0
+  realCornFeed.handleMessage(JSON.stringify([
+    'event',
+    ['fb', '2026-10-25,231,229'],
+    {
+      competition_id: 19,
+      competition_name: 'Italy Serie A',
+      home: 'Internazionale',
+      away: 'Fiorentina',
+      ir_status: { score: [0, 0], time: ['1h', 25] }
+    }
+  ]), false);
+
+  // 2) fb_corn event arrives with SAME eventId and corners score 4:2 -> MUST NOT overwrite goal score 0:0!
+  realCornFeed.handleMessage(JSON.stringify([
+    'event',
+    ['fb_corn', '2026-10-25,231,229'],
+    {
+      competition_id: 19,
+      competition_name: 'Italy Serie A',
+      home: 'Internazionale',
+      away: 'Fiorentina',
+      ir_status: { score: [4, 2], time: null }
+    }
+  ]), false);
+
+  smRealCorn.setActiveEvent('2026-10-25,231,229');
+  assert.deepEqual(smRealCorn.liveScoreFt, { home: 0, away: 0 }, 'fb_corn score [4,2] must NEVER overwrite main match goal score [0,0]');
+  assert.deepEqual(smRealCorn.eventsMap.get('2026-10-25,231,229').cornersFtScore, { home: 4, away: 2 }, 'cornersFtScore must be stored separately');
+  assert.equal(smRealCorn.eventsMap.get('2026-10-25,231,229').sport, 'fb', 'Main event sport must remain fb');
+
+  // 3) Feed fb_corn and fb_corn_ht offers_hcap on same eventId
+  realCornFeed.handleMessage(JSON.stringify([
+    'offers_hcap',
+    [19, 'fb_corn', '2026-10-25,231,229'],
+    {
+      'tahou,h': [[22, [['over', 1.82], ['under', 1.98]]]],
+      'tahou,a': [[14, [['over', 1.75], ['under', 2.05]]]]
+    }
+  ]), false);
+  realCornFeed.handleMessage(JSON.stringify([
+    'offers_hcap',
+    [19, 'fb_corn_ht', '2026-10-25,231,229'],
+    {
+      'tahou,h': [[14, [['over', 2.10], ['under', 1.70]]]]
+    }
+  ]), false);
+
+  assert.equal(smRealCorn.liveOdds.ft.cornersItb1Line, '5.50', 'fb_corn tahou,h must populate FT cornersItb1Line (5.50 > 4 home corners)');
+  assert.equal(smRealCorn.liveOdds.ft.cornersItb1Over, 1.82);
+  assert.equal(smRealCorn.liveOdds.ht.cornersItb1Line, '3.50', 'fb_corn_ht tahou,h must populate HT cornersItb1Line');
+  assert.equal(smRealCorn.liveOdds.ht.cornersItb1Over, 2.10);
+
+  // 4) Fire DRAW ('3') and CORNERS_ITB1 ('6') via ExecutionEngine -> must wait for async PMM quote and succeed!
+  const realCornEngine = new ExecutionEngine(realCornAdapter, smRealCorn, { ...testConfig, dryRun: true, debounceMs: 0 });
+  realCornEngine.setWsFeed(realCornFeed);
+
+  const drawFireRes = await realCornEngine.fire('DRAW');
+  assert.equal(drawFireRes.success, true, 'fire(DRAW) must wait for async PMM quote from pin88 and succeed');
+  assert.equal(drawFireRes.livePrice, 3.45, 'fire(DRAW) must use pin88 PMM price 3.45');
+
+  realCornEngine.lastFireTime = -Infinity;
+  const cornFireRes = await realCornEngine.fire('CORNERS_ITB1');
+  assert.equal(cornFireRes.success, true, 'fire(CORNERS_ITB1) must arm fb_corn slip, wait for PMM quote, and succeed');
+  assert.equal(cornFireRes.livePrice, 1.82, 'fire(CORNERS_ITB1) must use pin88 PMM price 1.82');
+
+  const cornPayload = capturedSlipPayloads.find(p => p.sport === 'fb_corn');
+  assert(cornPayload !== undefined, 'CORNERS_ITB1 preArmBetslip must use sport: "fb_corn"');
+  assert.equal(cornPayload.bet_type, 'for,ir,4,2,tahover,h,22', 'CORNERS_ITB1 bet_type must use tahover,h,22 with corners score 4,2');
+
+  smRealCorn.destroy();
+  await realCornFeed.destroy();
+  console.log('✓ Real fb_corn / fb_corn_ht protocol & async PMM quote resolution for DRAW / CORNERS_ITB verified');
 
   stickyWsFeed.destroy();
   smHt.destroy();

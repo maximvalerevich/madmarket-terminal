@@ -95,6 +95,25 @@ export class ExecutionEngine extends EventEmitter {
     if (isOnDemandTarget && (!armed.betslipId || (armed.expiryTs > 0 && Date.now() >= armed.expiryTs))) {
       await this.stateManager.armTarget(targetKey, true);
       armed = this.stateManager.getArmedBetslip(targetKey);
+      const isWsOnline = Boolean(this.wsFeed?.isConnected || this.stateManager.wsFeed?.isConnected);
+      if (armed && armed.betslipId && !(armed.bookiePrice > 1.0) && isWsOnline) {
+        const targetSlipId = armed.betslipId;
+        await new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            this.stateManager.removeListener('slip_quote_updated', onQuote);
+            resolve();
+          }, 850);
+          const onQuote = (ev) => {
+            if (ev && ev.betslipId === targetSlipId && ev.price > 1.0) {
+              clearTimeout(timer);
+              this.stateManager.removeListener('slip_quote_updated', onQuote);
+              resolve();
+            }
+          };
+          this.stateManager.on('slip_quote_updated', onQuote);
+        });
+        armed = this.stateManager.getArmedBetslip(targetKey);
+      }
     }
 
     if (!armed || !armed.betslipId) {
@@ -125,7 +144,7 @@ export class ExecutionEngine extends EventEmitter {
     // Absolute priority order:
     // 1. Fresh bookie quote (< 10s old) directly from PMM or betslip offer (e.g. pin88)
     // 2. armed.currentPrice (if set and valid)
-    // 3. rawLivePrice from general feed ticker (ONLY if no strict bookmaker filtering is configured)
+    // 3. rawLivePrice from general feed ticker (if no strict bookmaker filtering OR on-demand target fallback)
     // 4. armed.price (fallback)
     const now = Date.now();
     const hasFreshBookieQuote = armed.bookiePrice && (now - (armed.bookiePriceTs || 0) < 10000);
@@ -138,13 +157,16 @@ export class ExecutionEngine extends EventEmitter {
       livePrice = armed.bookiePrice;
     } else if (armed.currentPrice && armed.currentPrice > 1.0) {
       livePrice = armed.currentPrice;
-    } else if (!hasStrictAllowed && rawLivePrice > 1.0) {
+    } else if ((!hasStrictAllowed || isOnDemandTarget) && rawLivePrice > 1.0) {
       livePrice = rawLivePrice;
     } else if (armed.price && armed.price > 1.0) {
       livePrice = armed.price;
     }
 
     if (!livePrice || livePrice <= 1.0) {
+      if (isOnDemandTarget) {
+        this.stateManager.invalidateBetslip(targetKey);
+      }
       const msg = `[ABORT] Линия БК закрыта (кэф: 0.00). Дождитесь открытия котировок БК.`;
       logger.error('ExecutionEngine', msg);
       this.emit('log', { level: 'error', message: msg });
