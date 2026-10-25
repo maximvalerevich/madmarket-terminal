@@ -1526,6 +1526,98 @@ engine.on('log', (log) => logCaptured.push(log));
   smIh.destroy();
   console.log('✓ StateManager automatic hockey period switch (P1 -> P2) & coupon re-arming verified');
 
+  // 41. Test MollybetAdapter.getOpenBetslips() and purgeAllRemoteBetslips()
+  const deletedRemoteSlips = [];
+  const mockPurgeH2 = {
+    request: async (method, path) => {
+      if (method === 'GET' && path === '/v1/betslips/') {
+        return {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({
+            status: 'ok',
+            data: [
+              { betslip_id: 'ghost_slip_1', closed: false },
+              { id: 'ghost_slip_2', status: 'open' },
+              { betslip_id: 'closed_slip_3', closed: true },
+              'ghost_slip_4'
+            ]
+          }),
+          rttMs: 1.1
+        };
+      }
+      if (method === 'DELETE' && path.startsWith('/v1/betslips/')) {
+        const id = path.replace('/v1/betslips/', '').replace('/', '');
+        deletedRemoteSlips.push(id);
+        return { status: 200, headers: {}, body: '{}', rttMs: 0.9 };
+      }
+      return { status: 404, headers: {}, body: '{}', rttMs: 1.0 };
+    },
+    isConnected: true,
+    ensureConnected: async () => {}
+  };
+
+  const purgeAdapter = new MollybetAdapter(testConfig, mockPurgeH2);
+  const openIds = await purgeAdapter.getOpenBetslips();
+  assert.deepEqual(openIds, ['ghost_slip_1', 'ghost_slip_2', 'ghost_slip_4'], 'getOpenBetslips must return only open betslip IDs');
+
+  const purgedCount = await purgeAdapter.purgeAllRemoteBetslips();
+  assert.equal(purgedCount, 3, 'purgeAllRemoteBetslips must delete all 3 open ghost betslips');
+  assert.deepEqual(deletedRemoteSlips, ['ghost_slip_1', 'ghost_slip_2', 'ghost_slip_4']);
+  console.log('✓ MollybetAdapter.getOpenBetslips() & purgeAllRemoteBetslips() verified');
+
+  // 42. Test StateManager.purgeAllServerBetslips() and 403 Auto-Healing (purge + 300ms wait + retry)
+  let armAttempts = 0;
+  let purgeInvocations = 0;
+  const autoHealAdapter = {
+    deleteBetslip: async () => true,
+    purgeAllRemoteBetslips: async () => {
+      purgeInvocations++;
+      return 8;
+    },
+    preArmBetslip: async (targetKey) => {
+      armAttempts++;
+      if (armAttempts === 1) {
+        throw new Error('Failed to pre-arm betslip: HTTP 403 - {"status":"error","code":"too_many_open_betslips","message":"Betslip limit reached"}');
+      }
+      return {
+        betslipId: `healed_${targetKey}_slip`,
+        expiryTs: Date.now() + 60000,
+        betType: 'for,tp,reg,ahover,22',
+        maxStake: 500,
+        bookiePrice: 1.92,
+        price: 1.92,
+        rttMs: 1.5
+      };
+    }
+  };
+
+  const smHeal = new StateManager(testConfig);
+  smHeal.setAdapter(autoHealAdapter);
+  smHeal.eventsMap.set('heal_match_1', {
+    eventId: 'heal_match_1',
+    sport: 'ih',
+    homeTeam: 'SKA',
+    awayTeam: 'CSKA',
+    score: { home: 1, away: 1 },
+    isLive: true
+  });
+  smHeal.activeEventId = 'heal_match_1';
+  smHeal.armedPool.set('heal_match_1', smHeal.armedBetslips);
+
+  const healStartTs = Date.now();
+  await smHeal.armTarget('OVER', true);
+  const healElapsedMs = Date.now() - healStartTs;
+
+  assert.equal(purgeInvocations, 1, 'Auto-Heal must invoke purgeAllRemoteBetslips() immediately on 403');
+  assert.equal(armAttempts, 2, 'Auto-Heal must retry preArmBetslip after purging');
+  assert(healElapsedMs >= 280, 'Auto-Heal must wait ~300ms before retrying');
+  assert.equal(smHeal.armedBetslips.OVER.betslipId, 'healed_OVER_slip', 'Target betslip must be armed after auto-heal retry');
+  assert.equal(smHeal.quotaBackoffMap.has('OVER'), false, 'quotaBackoffMap must be cleared after successful auto-heal');
+
+  smHeal.destroy();
+  console.log('✓ StateManager.purgeAllServerBetslips() & 403 Auto-Healing verified');
+
   stickyWsFeed.destroy();
   smHt.destroy();
   testWsFeed.destroy();

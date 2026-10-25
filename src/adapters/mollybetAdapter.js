@@ -445,6 +445,72 @@ export class MollybetAdapter extends BaseAdapter {
   }
 
   /**
+   * Retrieves all currently open betslips on the Mollybet server (GET /v1/betslips/).
+   * @returns {Promise<string[]>} Array of open betslip_id strings
+   */
+  async getOpenBetslips() {
+    try {
+      const resp = await this.http2Client.request('GET', '/v1/betslips/', this.baseHeaders);
+      if (resp.status !== 200 || !resp.body) {
+        return [];
+      }
+
+      const parsed = JSON.parse(resp.body);
+      const rawData = parsed?.data ?? parsed;
+      const list = Array.isArray(rawData)
+        ? rawData
+        : (Array.isArray(rawData?.betslips) ? rawData.betslips : []);
+
+      const ids = [];
+      for (const item of list) {
+        if (!item) continue;
+        if (typeof item === 'string') {
+          ids.push(item);
+        } else if (typeof item === 'object') {
+          if (item.closed === true || item.status === 'closed') continue;
+          const id = item.betslip_id || item.id;
+          if (id && typeof id === 'string') {
+            ids.push(id);
+          }
+        }
+      }
+
+      return ids;
+    } catch (err) {
+      logger.debug('MollybetAdapter', `Failed to fetch open betslips: ${err.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Purges all open betslips on the remote Mollybet server in parallel (1 network RTT).
+   * @returns {Promise<number>} Number of purged betslips
+   */
+  async purgeAllRemoteBetslips() {
+    try {
+      const openIds = await this.getOpenBetslips();
+      if (!Array.isArray(openIds) || openIds.length === 0) {
+        logger.info('MollybetAdapter', '[MollybetAdapter] Удалено 0 зависших серверных купонов');
+        return 0;
+      }
+
+      const results = await Promise.allSettled(
+        openIds.map((id) => this.deleteBetslip(id))
+      );
+
+      const deletedCount = results.filter(
+        (r) => r.status === 'fulfilled' && r.value !== false
+      ).length;
+
+      logger.info('MollybetAdapter', `[MollybetAdapter] Удалено ${deletedCount} зависших серверных купонов`);
+      return deletedCount;
+    } catch (err) {
+      logger.error('MollybetAdapter', `Failed to purge remote betslips: ${err.message}`);
+      return 0;
+    }
+  }
+
+  /**
    * Retrieves current status and settlement of an order from Mollybet (GET /v1/orders/<orderId>/).
    * @param {string} orderId
    * @returns {Promise<{ success: boolean, orderId: string, status: string, closed: boolean, closeReason: string | null, gotPrice: number | null, placed: any[] | null, unplaced: any[] | null, bookie: string | null, rttMs: number, data: any, rawBody: string }>}

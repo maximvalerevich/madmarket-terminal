@@ -96,10 +96,36 @@ async function main() {
     config
   });
 
-  // Global uncaught error traps to prevent rawMode terminal lockup
-  process.on('uncaughtException', (err) => {
+  // Handle graceful exit and remote betslip cleanup
+  let isShuttingDown = false;
+  const shutdown = async (signal = 'SIGINT') => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    logger.info('Process', `Graceful shutdown initiated (${signal})...`);
+    ui.destroy();
+    stateManager.destroy();
+    await wsFeed.destroy().catch(() => {});
+    await adapter.purgeAllRemoteBetslips().catch(() => {});
+    await adapter.destroy().catch(() => {});
+    logger.destroy();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', async () => {
+    await shutdown('SIGINT');
+  });
+  process.on('SIGTERM', async () => {
+    await shutdown('SIGTERM');
+  });
+  process.on('SIGHUP', async () => {
+    await shutdown('SIGHUP');
+  });
+
+  // Global uncaught error traps to prevent rawMode terminal lockup and ghost betslips
+  process.on('uncaughtException', async (err) => {
     logger.error('Process', `Uncaught exception: ${err.message}`, err);
     ui.setLog('error', `[UNCAUGHT] ${err.message}`);
+    await shutdown('uncaughtException');
   });
 
   process.on('unhandledRejection', (reason) => {
@@ -108,32 +134,24 @@ async function main() {
     ui.setLog('error', `[PROMISE REJECTION] ${msg}`);
   });
 
-  // Handle graceful exit
-  const shutdown = async () => {
-    logger.info('Process', 'Graceful shutdown initiated...');
-    ui.destroy();
-    stateManager.destroy();
-    await wsFeed.destroy().catch(() => {});
-    await adapter.destroy().catch(() => {});
-    logger.destroy();
-    process.exit(0);
-  };
+  // Pre-warm HTTP/2 connection and purge any ghost betslips before starting WebSocket and UI
+  let h2Connected = false;
+  try {
+    await http2Client.connect();
+    h2Connected = true;
+  } catch (err) {
+    logger.warn('Bootstrap', `Initial HTTP/2 connection error: ${err.message}`);
+  }
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  await stateManager.purgeAllServerBetslips();
 
   // Start UI
   ui.start();
-  ui.setLog('info', 'Инициализация терминала и сетевых коннекторов...');
-
-  // Start HTTP/2 pre-warm connection in background
-  http2Client.connect()
-    .then(() => {
-      ui.setLog('success', `HTTP/2 соединение установлено с ${config.baseUrl}`);
-    })
-    .catch((err) => {
-      ui.setLog('error', `Ошибка подключения HTTP/2: ${err.message}`);
-    });
+  if (h2Connected) {
+    ui.setLog('success', `HTTP/2 соединение установлено с ${config.baseUrl}. Серверные купоны очищены.`);
+  } else {
+    ui.setLog('warn', 'Инициализация терминала (HTTP/2 переподключается в фоне)...');
+  }
 
   // Start WebSocket feed connection
   wsFeed.connect();

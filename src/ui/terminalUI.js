@@ -501,7 +501,7 @@ export class TerminalUI {
     // 10. Line 5: Hotkeys Guide
     const mMode = this.stateManager.activeMarketMode;
     const pLabel = this.stateManager.activePeriod;
-    const hotkeysLine = `${C.cyan}[SPACE=ТОТАЛ, 1/2=УДАР, 6/7=ИТБ, L=ЛИНИИ, </>=СМЕНА ТБ, I=РЕЖИМ, T=ТАЙМ, 3/4/5=HT, B=ИСТОРИЯ, M=МЕНЮ, TAB=ЛОГИ, Q=ВЫХОД]${C.reset}`;
+    const hotkeysLine = `${C.cyan}[SPACE=ТОТАЛ, 1/2=УДАР, 6/7=ИТБ, L=ЛИНИИ, </>=СМЕНА ТБ, I=РЕЖИМ, T=ТАЙМ, 3/4/5=HT, X/Shift+D=СБРОС КУПОНОВ, B=ИСТОРИЯ, M=МЕНЮ, TAB=ЛОГИ, Q=ВЫХОД]${C.reset}`;
 
     process.stdout.write(
       `${C.cursorHome}` +
@@ -888,9 +888,12 @@ export class TerminalUI {
       return;
     }
 
-    // Disarm ALL events: 'D' (Shift+D) or 'delete' key
-    if (str === 'D' || key.name === 'delete') {
-      this.stateManager.disarmAll();
+    // Emergency purge of all remote & local betslips: 'X' / 'x' or 'D' (Shift+D) or 'delete' key
+    if (str === 'x' || str === 'X' || str === 'D' || key.name === 'delete') {
+      this.setLog('warn', '[СИСТЕМА] Все серверные купоны принудительно удалены. Пул очищен!');
+      this.stateManager.purgeAllServerBetslips().then(() => {
+        this.render();
+      }).catch(() => {});
       process.stdout.write(C.clearScreen);
       this.render();
       return;
@@ -909,14 +912,6 @@ export class TerminalUI {
     if (str === 's' || str === 'S') {
       this.mode = 'INPUT_STAKE';
       this.stakeInputBuffer = '';
-      this.render();
-      return;
-    }
-
-    // Quick MAX stake: 'x' or 'X'
-    if (str === 'x' || str === 'X') {
-      const maxLimit = this.stateManager.getMaxStakeLimit();
-      this.stateManager.setStake(maxLimit);
       this.render();
       return;
     }
@@ -1137,10 +1132,13 @@ export class TerminalUI {
       return;
     }
 
-    // Delete ALL coupons: 'D' (Shift+D)
-    if (str === 'D') {
-      this.stateManager.disarmAll();
+    // Emergency purge of ALL remote & local coupons: 'D' (Shift+D) or 'X' / 'x'
+    if (str === 'D' || str === 'x' || str === 'X') {
+      this.setLog('warn', '[СИСТЕМА] Все серверные купоны принудительно удалены. Пул очищен!');
       this.couponsSelectedIndex = 0;
+      this.stateManager.purgeAllServerBetslips().then(() => {
+        this.render();
+      }).catch(() => {});
       this.render();
       return;
     }

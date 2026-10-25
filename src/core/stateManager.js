@@ -1191,8 +1191,9 @@ export class StateManager extends EventEmitter {
    * @param {string} eventId
    * @param {'OVER' | 'HOME' | 'AWAY'} targetKey
    * @param {boolean} [force=false]
+   * @param {boolean} [isRetry=false]
    */
-  async armEventTarget(eventId, targetKey, force = false) {
+  async armEventTarget(eventId, targetKey, force = false, isRetry = false) {
     if (!this.adapter || !eventId) return;
 
     let poolEntry = this.armedPool.get(eventId);
@@ -1331,7 +1332,22 @@ export class StateManager extends EventEmitter {
       }
     } catch (err) {
       slip.error = err.message;
-      if (err.message && err.message.includes('too_many_open_betslips')) {
+      const isQuotaError = Boolean(
+        err.message && (
+          err.message.includes('too_many_open_betslips') ||
+          err.message.includes('Betslip limit reached')
+        )
+      );
+
+      if (isQuotaError) {
+        if (!isRetry && this.adapter && typeof this.adapter.purgeAllRemoteBetslips === 'function') {
+          logger.warn('StateManager', `[Auto-Heal] Mollybet 403 quota limit hit for ${targetKey}. Purging all remote betslips and retrying in 300ms...`);
+          slip.isArming = false;
+          await this.purgeAllServerBetslips();
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          return await this.armEventTarget(eventId, targetKey, true, true);
+        }
+
         // Apply 6s backoff on this targetKey to allow Mollybet server to expire or purge orphaned betslips
         this.quotaBackoffMap.set(targetKey, Date.now() + 6000);
         logger.warn('StateManager', `Mollybet 403 quota exceeded for ${targetKey}. Backing off re-arming by 6s to allow server slots to free.`);
@@ -1802,6 +1818,42 @@ export class StateManager extends EventEmitter {
     this.liveOdds.ht = this.createEmptyPeriodOdds('HT');
     logger.warn('StateManager', 'All armed betslips disarmed and cleared from pool');
     this.emit('state_updated');
+  }
+
+  /**
+   * Purges all open betslips on the remote Mollybet server and resets local coupon slots and backoff timers.
+   * @returns {Promise<number>} Number of purged remote betslips
+   */
+  async purgeAllServerBetslips() {
+    let purgedCount = 0;
+    if (this.adapter) {
+      if (typeof this.adapter.purgeAllRemoteBetslips === 'function') {
+        try {
+          purgedCount = await this.adapter.purgeAllRemoteBetslips();
+        } catch (err) {
+          logger.error('StateManager', `Failed to purge remote betslips: ${err.message}`);
+        }
+      } else if (typeof this.adapter.deleteBetslip === 'function') {
+        const localIds = new Set();
+        for (const [_, slips] of this.armedPool.entries()) {
+          for (const key of ['OVER', 'HOME', 'AWAY', 'ITB1', 'ITB2']) {
+            if (slips[key]?.betslipId) localIds.add(slips[key].betslipId);
+          }
+        }
+        for (const key of ['OVER', 'HOME', 'AWAY', 'ITB1', 'ITB2']) {
+          if (this.armedBetslips[key]?.betslipId) localIds.add(this.armedBetslips[key].betslipId);
+        }
+        await Promise.allSettled([...localIds].map((id) => this.adapter.deleteBetslip(id)));
+        purgedCount = localIds.size;
+      }
+    }
+
+    this.armedPool.clear();
+    this.armedBetslips = this.createEmptySlips(this.activePeriod, this.activeMarketMode);
+    this.quotaBackoffMap.clear();
+    logger.warn('StateManager', `[Purge] Серверные купоны очищены (${purgedCount} шт.), локальный пул и квоты сброшены.`);
+    this.emit('state_updated');
+    return purgedCount;
   }
 
   /**
