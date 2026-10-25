@@ -311,12 +311,3 @@ Outputs:
 
 ---
 
-## 8. Guidelines for Future AI Assistants & Developers
-
-Detailed rules and system constraints are documented in [ARCHITECTURE_CONSTRAINTS.md](file:///d:/Sites/Bookmaker/ARCHITECTURE_CONSTRAINTS.md). When making modifications or adding features:
-1. **Preserve Zero-Dependency Execution**: Never add npm packages for networking, parsing, or terminal control. All features must rely on Node.js native libraries. Only `ws` is allowed.
-2. **Never Exceed 3 Armed Slips (4-slip broker quota)**: Mollybet returns HTTP 403 `too_many_open_betslips` if slips accumulate. Any code that opens new betslips MUST invoke `deleteBetslip` on outgoing slips first.
-3. **Strict Bookmaker Filtering (`pin88`)**: Never revert to global `Math.max()` across all bookies. Always check `getAllowedBookies()`. If the target bookie has no offers in betslip, set `currentPrice = 0` and `priceSource = 'CLOSED'`. Never let generic WS feed ticks overwrite a closed target bookie line.
-4. **Never Guess or Resurrect Odds in UI**: In `TerminalUI.formatSlipStatus`, closed slips must show `0.00 (ЗАКРЫТО <TTL>s)`. Generic broker prices must never be displayed as green `OK` for a coupon bound to a strict bookie.
-5. **Score & Period Isolation (FT vs HT)**: Keep `liveScoreFt` and `liveScoreHt` separated. Never propagate FT score changes to HT markets or vice versa.
-6. **Always Run `npm test`**: Verify all 40 architectural tests pass before committing any changes.
