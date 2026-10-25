@@ -113,6 +113,12 @@ export class WsFeed extends BaseFeed {
      * @type {Map<string, number>}
      */
     this.eventHockeyPeriods = new Map();
+
+    /**
+     * Tracks live scores per scopeKey (`${eventId}:${sport}`) to evict stale/settled lines after goals.
+     * @type {Map<string, { home: number, away: number }>}
+     */
+    this.eventScores = new Map();
   }
 
   /**
@@ -297,6 +303,11 @@ export class WsFeed extends BaseFeed {
     for (const key of Array.from(this.lineSpectrums.keys())) {
       if (key.startsWith(`${id}:`)) {
         this.lineSpectrums.delete(key);
+      }
+    }
+    for (const key of Array.from(this.eventScores.keys())) {
+      if (key.startsWith(`${id}:`)) {
+        this.eventScores.delete(key);
       }
     }
 
@@ -517,6 +528,9 @@ export class WsFeed extends BaseFeed {
         const half = ir.time[0] === '1h' ? '1H' : (ir.time[0] === '2h' ? '2H' : ir.time[0]);
         minute = `${half} ${ir.time[1]}'`;
         isLive = true;
+        if (sport === 'fb' && ir.time[0] === '1h') {
+          htScore = { ...score };
+        }
       }
     }
 
@@ -539,6 +553,20 @@ export class WsFeed extends BaseFeed {
       }
     }
 
+    if (isLive) {
+      if (isHockey) {
+        this.syncEventScore(eventId, `${eventId}:ih:FT`, score);
+        if (htScore) {
+          this.syncEventScore(eventId, `${eventId}:ih:P${hockeyPeriod}`, htScore);
+        }
+      } else {
+        this.syncEventScore(eventId, `${eventId}:${sport}`, score);
+        if (htScore && sport === 'fb') {
+          this.syncEventScore(eventId, `${eventId}:fb_ht`, htScore);
+        }
+      }
+    }
+
     const eventPayload = {
       eventId,
       sport,
@@ -548,7 +576,7 @@ export class WsFeed extends BaseFeed {
       awayTeam,
       score,
       ftScore: (sport === 'fb' || isHockey) ? score : undefined,
-      htScore: isHockey ? htScore : (sport === 'fb_ht' ? score : undefined),
+      htScore: isHockey ? htScore : (sport === 'fb_ht' ? score : htScore),
       hockeyPeriod,
       periodScores,
       periodScoresStr: isHockey ? periodScoresStr : undefined,
@@ -560,6 +588,58 @@ export class WsFeed extends BaseFeed {
     };
 
     this.emit('event_update', eventPayload);
+  }
+
+  /**
+   * Synchronizes live score for an event scope and evicts stale/settled lines from spectrum and sticky caches.
+   * @param {string} eventId
+   * @param {string} scopeOrSport - e.g. 'fb', 'fb_ht', 'ih', or full scopeKey `${eventId}:fb`
+   * @param {{ home: number, away: number }} score
+   */
+  syncEventScore(eventId, scopeOrSport, score) {
+    if (!eventId || !score) return;
+    const home = Number(score.home) || 0;
+    const away = Number(score.away) || 0;
+    const total = home + away;
+
+    const scopeKey = String(scopeOrSport).startsWith(`${eventId}:`)
+      ? String(scopeOrSport)
+      : (scopeOrSport === 'ih' ? `${eventId}:ih:FT` : `${eventId}:${scopeOrSport}`);
+
+    const prev = this.eventScores.get(scopeKey);
+    this.eventScores.set(scopeKey, { home, away });
+
+    const sticky = this.eventActiveLines.get(scopeKey);
+    if (prev && (prev.home !== home || prev.away !== away)) {
+      if (sticky) {
+        sticky.totalLine = null;
+        if (prev.home !== home) sticky.itb1Line = null;
+        if (prev.away !== away) sticky.itb2Line = null;
+      }
+      this.lineSpectrums.delete(`${scopeKey}:ahou`);
+      if (prev.home !== home) this.lineSpectrums.delete(`${scopeKey}:itb1`);
+      if (prev.away !== away) this.lineSpectrums.delete(`${scopeKey}:itb2`);
+    }
+
+    if (sticky) {
+      if (sticky.totalLine && parseFloat(sticky.totalLine) <= total) sticky.totalLine = null;
+      if (sticky.itb1Line && parseFloat(sticky.itb1Line) <= home) sticky.itb1Line = null;
+      if (sticky.itb2Line && parseFloat(sticky.itb2Line) <= away) sticky.itb2Line = null;
+    }
+
+    const pruneSpectrum = (specKey, minGoalVal) => {
+      const map = this.lineSpectrums.get(specKey);
+      if (!map) return;
+      for (const [lineStr] of map.entries()) {
+        if (parseFloat(lineStr) <= minGoalVal) {
+          map.delete(lineStr);
+        }
+      }
+    };
+
+    pruneSpectrum(`${scopeKey}:ahou`, total);
+    pruneSpectrum(`${scopeKey}:itb1`, home);
+    pruneSpectrum(`${scopeKey}:itb2`, away);
   }
 
   /**
@@ -584,9 +664,11 @@ export class WsFeed extends BaseFeed {
    * @param {string} defaultLine
    * @param {string} [preferredLine]
    * @param {string} [spectrumKey] - e.g. `${eventId}:${sport}:${marketType}`
+   * @param {string} [selectionMode='even_money']
+   * @param {number} [minExclusiveLine=-1] - Minimum goals already scored (lines <= this value are already settled)
    * @returns {{ totalOver: number, totalUnder: number, totalLine: string | null, rawTotalLineIndex: number | null, allLines: Array }}
    */
-  parseTotalMarket(rawMarket, defaultLine = '2.5', preferredLine = null, spectrumKey = null, selectionMode = 'even_money') {
+  parseTotalMarket(rawMarket, defaultLine = '2.5', preferredLine = null, spectrumKey = null, selectionMode = 'even_money', minExclusiveLine = -1) {
     if (!rawMarket) return { totalOver: 0, totalUnder: 0, totalLine: null, rawTotalLineIndex: null, allLines: [] };
 
     const parseSingle = (entry) => {
@@ -652,6 +734,12 @@ export class WsFeed extends BaseFeed {
       return { totalOver: 0, totalUnder: 0, totalLine: null, rawTotalLineIndex: null, allLines: [] };
     }
 
+    // Filter out any already-settled lines (<= minExclusiveLine) when newer lines exist
+    const filteredIncoming = minExclusiveLine >= 0
+      ? incomingLines.filter(item => parseFloat(item.totalLine) > minExclusiveLine)
+      : incomingLines;
+    const validIncoming = filteredIncoming.length > 0 ? filteredIncoming : incomingLines;
+
     // Accumulate in lineSpectrums registry if spectrumKey is provided
     let allLines = [];
     if (spectrumKey) {
@@ -660,18 +748,29 @@ export class WsFeed extends BaseFeed {
         spectrumMap = new Map();
         this.lineSpectrums.set(spectrumKey, spectrumMap);
       }
-      for (const item of incomingLines) {
+      if (minExclusiveLine >= 0) {
+        for (const [k] of spectrumMap.entries()) {
+          if (parseFloat(k) <= minExclusiveLine) {
+            spectrumMap.delete(k);
+          }
+        }
+      }
+      for (const item of validIncoming) {
         spectrumMap.set(item.totalLine, item);
       }
       allLines = Array.from(spectrumMap.values());
     } else {
-      allLines = incomingLines;
+      allLines = validIncoming;
+    }
+
+    if (allLines.length === 0) {
+      return { totalOver: 0, totalUnder: 0, totalLine: null, rawTotalLineIndex: null, allLines: [] };
     }
 
     allLines.sort((a, b) => parseFloat(a.totalLine) - parseFloat(b.totalLine));
 
-    // 1. Sticky line check: if preferredLine is provided and still has active offers, stick to it!
-    if (preferredLine) {
+    // 1. Sticky line check: if preferredLine is provided, > minExclusiveLine, and still has active offers, stick to it!
+    if (preferredLine && (minExclusiveLine < 0 || parseFloat(preferredLine) > minExclusiveLine)) {
       const pref = allLines.find(x => x.totalLine === String(preferredLine));
       if (pref && pref.totalOver > 1.0) {
         return {
@@ -758,10 +857,14 @@ export class WsFeed extends BaseFeed {
     }
 
     const stickyLines = this.eventActiveLines.get(scopeKey) || {};
+    const currentScore = this.eventScores.get(scopeKey);
+    const minTotalLine = currentScore ? (currentScore.home + currentScore.away) : -1;
+    const minItb1Line = currentScore ? currentScore.home : -1;
+    const minItb2Line = currentScore ? currentScore.away : -1;
 
     if (marketSlice.hasAhou && marketSlice.rawAhou) {
       const ahouKey = `${scopeKey}:ahou`;
-      const parsedAhou = this.parseTotalMarket(marketSlice.rawAhou, defaultTotalLine, stickyLines.totalLine, ahouKey);
+      const parsedAhou = this.parseTotalMarket(marketSlice.rawAhou, defaultTotalLine, stickyLines.totalLine, ahouKey, 'even_money', minTotalLine);
       parsedOdds.totalLines = parsedAhou.allLines || [];
       if (parsedAhou.totalOver > 0 || parsedAhou.totalUnder > 0 || parsedAhou.totalLine) {
         parsedOdds.totalOver = parsedAhou.totalOver;
@@ -774,7 +877,7 @@ export class WsFeed extends BaseFeed {
 
     if (marketSlice.hasTahouH && marketSlice.rawTahouH) {
       const itb1Key = `${scopeKey}:itb1`;
-      const parsedTahouH = this.parseTotalMarket(marketSlice.rawTahouH, defaultItbLine, stickyLines.itb1Line, itb1Key, 'lowest');
+      const parsedTahouH = this.parseTotalMarket(marketSlice.rawTahouH, defaultItbLine, null, itb1Key, 'lowest', minItb1Line);
       parsedOdds.itb1Lines = parsedTahouH.allLines || [];
       if (parsedTahouH.totalOver > 0 || parsedTahouH.totalUnder > 0 || parsedTahouH.totalLine) {
         parsedOdds.itb1Over = parsedTahouH.totalOver;
@@ -787,7 +890,7 @@ export class WsFeed extends BaseFeed {
 
     if (marketSlice.hasTahouA && marketSlice.rawTahouA) {
       const itb2Key = `${scopeKey}:itb2`;
-      const parsedTahouA = this.parseTotalMarket(marketSlice.rawTahouA, defaultItbLine, stickyLines.itb2Line, itb2Key, 'lowest');
+      const parsedTahouA = this.parseTotalMarket(marketSlice.rawTahouA, defaultItbLine, null, itb2Key, 'lowest', minItb2Line);
       parsedOdds.itb2Lines = parsedTahouA.allLines || [];
       if (parsedTahouA.totalOver > 0 || parsedTahouA.totalUnder > 0 || parsedTahouA.totalLine) {
         parsedOdds.itb2Over = parsedTahouA.totalOver;
@@ -1044,6 +1147,7 @@ export class WsFeed extends BaseFeed {
     }
     this.eventActiveLines.clear();
     this.lineSpectrums.clear();
+    this.eventScores.clear();
     this.isConnected = false;
   }
 }

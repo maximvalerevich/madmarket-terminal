@@ -616,6 +616,9 @@ export class StateManager extends EventEmitter {
         ? { ...this.createEmptyPeriodOdds('HT', evSport), ...event.odds.ht }
         : this.createEmptyPeriodOdds('HT', evSport);
 
+      this._reconcileOddsWithScore(this.activeEventId, 'ft', this.liveScoreFt);
+      this._reconcileOddsWithScore(this.activeEventId, 'ht', this.liveScoreHt);
+
       if (this.wsFeed) {
         this.wsFeed.subscribeToEvent(event.competitionId, event.sport, this.activeEventId);
       }
@@ -676,6 +679,98 @@ export class StateManager extends EventEmitter {
   }
 
   /**
+   * Ensures all total and individual total lines (OVER, ITB1, ITB2) for an event and period
+   * are strictly greater than the already-scored goals, immediately advancing any settled/obsolete line
+   * (e.g., ITB2 0.5 -> 1.5 when score becomes 0:1).
+   * @param {string} eventId
+   * @param {'ft' | 'ht'} periodKey
+   * @param {{ home: number, away: number }} score
+   * @param {boolean} [onGoal=false]
+   */
+  _reconcileOddsWithScore(eventId, periodKey, score, onGoal = false) {
+    if (!eventId || !score) return;
+    const home = Number(score.home) || 0;
+    const away = Number(score.away) || 0;
+    const totalGoals = home + away;
+    const isHt = periodKey === 'ht';
+
+    // Clear any manual user line overrides that have already been settled by the new score
+    const overKey = isHt ? 'HT_OVER' : 'OVER';
+    const itb1Key = isHt ? 'HT_ITB1' : 'ITB1';
+    const itb2Key = isHt ? 'HT_ITB2' : 'ITB2';
+
+    const userOver = this.getUserLineOverride(overKey, eventId);
+    if (userOver && parseFloat(userOver.totalLine) <= totalGoals) {
+      this.userLineOverrides.delete(`${eventId}:${overKey}`);
+    }
+    const userItb1 = this.getUserLineOverride(itb1Key, eventId);
+    if (userItb1 && parseFloat(userItb1.totalLine) <= home) {
+      this.userLineOverrides.delete(`${eventId}:${itb1Key}`);
+    }
+    const userItb2 = this.getUserLineOverride(itb2Key, eventId);
+    if (userItb2 && parseFloat(userItb2.totalLine) <= away) {
+      this.userLineOverrides.delete(`${eventId}:${itb2Key}`);
+    }
+
+    const advanceTargetOdds = (oddsObj) => {
+      if (!oddsObj || typeof oddsObj !== 'object') return;
+
+      const filterLinesIfValid = (arr, minG) => {
+        if (!Array.isArray(arr)) return [];
+        const higher = arr.filter(x => parseFloat(x.totalLine) > minG);
+        return (higher.length > 0 || onGoal) ? higher : arr;
+      };
+
+      if (Array.isArray(oddsObj.totalLines)) {
+        oddsObj.totalLines = filterLinesIfValid(oddsObj.totalLines, totalGoals);
+      }
+      if (Array.isArray(oddsObj.itb1Lines)) {
+        oddsObj.itb1Lines = filterLinesIfValid(oddsObj.itb1Lines, home);
+      }
+      if (Array.isArray(oddsObj.itb2Lines)) {
+        oddsObj.itb2Lines = filterLinesIfValid(oddsObj.itb2Lines, away);
+      }
+
+      const stepIfObsolete = (lineField, idxField, overField, underField, linesField, minGoals) => {
+        const curStr = oddsObj[lineField];
+        if (!curStr) return;
+        const curVal = parseFloat(curStr);
+        if (Number.isNaN(curVal) || curVal > minGoals) return;
+
+        const validLines = Array.isArray(oddsObj[linesField]) ? oddsObj[linesField] : [];
+        const nextEntry = validLines.find(x => parseFloat(x.totalLine) > minGoals && x.totalOver > 1.0)
+          || validLines.find(x => parseFloat(x.totalLine) > minGoals);
+
+        if (nextEntry) {
+          oddsObj[lineField] = nextEntry.totalLine;
+          oddsObj[idxField] = nextEntry.rawTotalLineIndex;
+          oddsObj[overField] = nextEntry.totalOver || 0;
+          oddsObj[underField] = nextEntry.totalUnder || 0;
+        } else if (onGoal) {
+          const nextVal = minGoals + 0.5;
+          const decimals = (String(curStr).includes('.') && String(curStr).split('.')[1]?.length === 2) ? 2 : 1;
+          oddsObj[lineField] = nextVal.toFixed(decimals);
+          oddsObj[idxField] = Math.round(nextVal * 4);
+          oddsObj[overField] = 0;
+          oddsObj[underField] = 0;
+        }
+      };
+
+      stepIfObsolete('totalLine', 'rawTotalLineIndex', 'totalOver', 'totalUnder', 'totalLines', totalGoals);
+      stepIfObsolete('itb1Line', 'rawItb1LineIndex', 'itb1Over', 'itb1Under', 'itb1Lines', home);
+      stepIfObsolete('itb2Line', 'rawItb2LineIndex', 'itb2Over', 'itb2Under', 'itb2Lines', away);
+    };
+
+    const ev = this.eventsMap.get(eventId);
+    if (ev?.odds?.[periodKey]) {
+      advanceTargetOdds(ev.odds[periodKey]);
+    }
+    if (this.activeEventId === eventId && this.liveOdds[periodKey]) {
+      advanceTargetOdds(this.liveOdds[periodKey]);
+    }
+  }
+
+  /**
    * Updates match metadata from WebSocket event frame.
    * @param {Object} data
    */
@@ -716,13 +811,41 @@ export class StateManager extends EventEmitter {
       if (isHtSport) {
         existing.htScore = incomingScore;
         updated.htScore = incomingScore;
+        if (this.wsFeed && typeof this.wsFeed.syncEventScore === 'function') {
+          this.wsFeed.syncEventScore(eventId, 'fb_ht', incomingScore);
+        }
       } else {
         existing.ftScore = incomingScore;
         updated.ftScore = incomingScore;
+        if (this.wsFeed && typeof this.wsFeed.syncEventScore === 'function') {
+          this.wsFeed.syncEventScore(eventId, isHockey ? `${eventId}:ih:FT` : sport, incomingScore);
+          if (updated.htScore) {
+            this.wsFeed.syncEventScore(
+              eventId,
+              isHockey ? `${eventId}:ih:P${updated.hockeyPeriod || 1}` : 'fb_ht',
+              updated.htScore
+            );
+          }
+        }
       }
     }
 
     this.eventsMap.set(eventId, updated);
+
+    if (data.score) {
+      const incomingScore = {
+        home: Number(data.score.home) || 0,
+        away: Number(data.score.away) || 0
+      };
+      if (isHtSport) {
+        this._reconcileOddsWithScore(eventId, 'ht', incomingScore);
+      } else {
+        this._reconcileOddsWithScore(eventId, 'ft', incomingScore);
+        if (updated.htScore) {
+          this._reconcileOddsWithScore(eventId, 'ht', updated.htScore);
+        }
+      }
+    }
 
     if (this.activeEventId === eventId) {
       let hockeyPeriodSwitched = false;
@@ -766,16 +889,30 @@ export class StateManager extends EventEmitter {
           away: Number(data.score.away) || 0
         };
 
+        const clearPreGoalPrices = () => {
+          for (const k of ['OVER', 'HOME', 'AWAY', 'ITB1', 'ITB2']) {
+            const s = this.armedBetslips[k];
+            if (s) {
+              s.bookiePrice = null;
+              s.bookiePriceTs = 0;
+              s.currentPrice = 0;
+            }
+          }
+        };
+
         if (isHtSport) {
           const prevHt = `${this.liveScoreHt.home}-${this.liveScoreHt.away}`;
           const newHt = `${incomingScore.home}-${incomingScore.away}`;
+          const htChanged = prevHt !== newHt;
           this.liveScoreHt = incomingScore;
+          this._reconcileOddsWithScore(eventId, 'ht', incomingScore, htChanged);
 
           if (this.activePeriod === 'HT') {
             const prevActive = `${this.liveScore.home}-${this.liveScore.away}`;
             this.liveScore = { ...incomingScore };
-            if (prevHt !== newHt && prevActive !== newHt) {
+            if (htChanged && prevActive !== newHt) {
               logger.warn('StateManager', `GOAL DETECTED in match ${eventId} [HT]: ${prevHt} -> ${newHt}! Refreshing betslips immediately!`);
+              clearPreGoalPrices();
               this.emit('score_changed', { eventId, score: this.liveScore });
               this.refreshAllBetslips(true);
             }
@@ -783,17 +920,22 @@ export class StateManager extends EventEmitter {
         } else {
           const prevFt = `${this.liveScoreFt.home}-${this.liveScoreFt.away}`;
           const newFt = `${incomingScore.home}-${incomingScore.away}`;
+          const ftChanged = prevFt !== newFt;
           this.liveScoreFt = incomingScore;
+          this._reconcileOddsWithScore(eventId, 'ft', incomingScore, ftChanged);
 
-          if (isHockey && updated.htScore && !hockeyPeriodSwitched) {
+          if (updated.htScore && !hockeyPeriodSwitched) {
             const prevHt = `${this.liveScoreHt.home}-${this.liveScoreHt.away}`;
             const newHt = `${updated.htScore.home}-${updated.htScore.away}`;
+            const htChanged = prevHt !== newHt;
             this.liveScoreHt = { ...updated.htScore };
+            this._reconcileOddsWithScore(eventId, 'ht', this.liveScoreHt, htChanged);
             if (this.activePeriod === 'HT') {
               const prevActive = `${this.liveScore.home}-${this.liveScore.away}`;
               this.liveScore = { ...this.liveScoreHt };
-              if (prevHt !== newHt && prevActive !== newHt) {
-                logger.warn('StateManager', `GOAL DETECTED in hockey match ${eventId} [P${this.currentHockeyPeriod}]: ${prevHt} -> ${newHt}! Refreshing betslips immediately!`);
+              if (htChanged && prevActive !== newHt) {
+                logger.warn('StateManager', `GOAL DETECTED in match ${eventId} [HT/P${this.currentHockeyPeriod}]: ${prevHt} -> ${newHt}! Refreshing betslips immediately!`);
+                clearPreGoalPrices();
                 this.emit('score_changed', { eventId, score: this.liveScore });
                 this.refreshAllBetslips(true);
               }
@@ -803,8 +945,9 @@ export class StateManager extends EventEmitter {
           if (this.activePeriod === 'FT') {
             const prevActive = `${this.liveScore.home}-${this.liveScore.away}`;
             this.liveScore = { ...incomingScore };
-            if (prevFt !== newFt && prevActive !== newFt) {
+            if (ftChanged && prevActive !== newFt) {
               logger.warn('StateManager', `GOAL DETECTED in match ${eventId} [FT]: ${prevFt} -> ${newFt}! Refreshing betslips immediately!`);
+              clearPreGoalPrices();
               this.emit('score_changed', { eventId, score: this.liveScore });
               this.refreshAllBetslips(true);
             }
@@ -894,6 +1037,8 @@ export class StateManager extends EventEmitter {
         };
       }
       event.lastUpdate = Date.now();
+      const evScore = isHt ? (event.htScore || { home: 0, away: 0 }) : (event.ftScore || event.score || { home: 0, away: 0 });
+      this._reconcileOddsWithScore(eventId, targetPeriod, evScore);
     }
 
     if (this.activeEventId === eventId) {
@@ -902,22 +1047,10 @@ export class StateManager extends EventEmitter {
       if (updatedMarkets) {
         if (updatedMarkets.ahou) {
           if (odds.totalLines && odds.totalLines.length > 0) pOdds.totalLines = odds.totalLines;
-
-          // Check if current active totalLine is present in new totalLines spectrum
-          const existingLine = pOdds.totalLine
-            ? pOdds.totalLines?.find(x => x.totalLine === pOdds.totalLine)
-            : null;
-
-          if (existingLine && existingLine.totalOver > 0) {
-            pOdds.totalOver = existingLine.totalOver;
-            pOdds.totalUnder = existingLine.totalUnder;
-            pOdds.rawTotalLineIndex = existingLine.rawTotalLineIndex;
-          } else {
-            pOdds.totalOver = odds.totalOver || 0;
-            pOdds.totalUnder = odds.totalUnder || 0;
-            if (odds.totalLine) pOdds.totalLine = odds.totalLine;
-            if (odds.rawTotalLineIndex != null) pOdds.rawTotalLineIndex = odds.rawTotalLineIndex;
-          }
+          pOdds.totalOver = odds.totalOver || 0;
+          pOdds.totalUnder = odds.totalUnder || 0;
+          if (odds.totalLine) pOdds.totalLine = odds.totalLine;
+          if (odds.rawTotalLineIndex != null) pOdds.rawTotalLineIndex = odds.rawTotalLineIndex;
         }
         if (updatedMarkets.wdw) {
           pOdds.winHome = odds.winHome || 0;
@@ -926,39 +1059,17 @@ export class StateManager extends EventEmitter {
         }
         if (updatedMarkets.itb1) {
           if (odds.itb1Lines && odds.itb1Lines.length > 0) pOdds.itb1Lines = odds.itb1Lines;
-
-          const existingItb1 = pOdds.itb1Line
-            ? pOdds.itb1Lines?.find(x => x.totalLine === pOdds.itb1Line)
-            : null;
-
-          if (existingItb1 && existingItb1.totalOver > 0) {
-            pOdds.itb1Over = existingItb1.totalOver;
-            pOdds.itb1Under = existingItb1.totalUnder;
-            pOdds.rawItb1LineIndex = existingItb1.rawTotalLineIndex;
-          } else {
-            pOdds.itb1Over = odds.itb1Over || 0;
-            pOdds.itb1Under = odds.itb1Under || 0;
-            if (odds.itb1Line) pOdds.itb1Line = odds.itb1Line;
-            if (odds.rawItb1LineIndex != null) pOdds.rawItb1LineIndex = odds.rawItb1LineIndex;
-          }
+          pOdds.itb1Over = odds.itb1Over || 0;
+          pOdds.itb1Under = odds.itb1Under || 0;
+          if (odds.itb1Line) pOdds.itb1Line = odds.itb1Line;
+          if (odds.rawItb1LineIndex != null) pOdds.rawItb1LineIndex = odds.rawItb1LineIndex;
         }
         if (updatedMarkets.itb2) {
           if (odds.itb2Lines && odds.itb2Lines.length > 0) pOdds.itb2Lines = odds.itb2Lines;
-
-          const existingItb2 = pOdds.itb2Line
-            ? pOdds.itb2Lines?.find(x => x.totalLine === pOdds.itb2Line)
-            : null;
-
-          if (existingItb2 && existingItb2.totalOver > 0) {
-            pOdds.itb2Over = existingItb2.totalOver;
-            pOdds.itb2Under = existingItb2.totalUnder;
-            pOdds.rawItb2LineIndex = existingItb2.rawTotalLineIndex;
-          } else {
-            pOdds.itb2Over = odds.itb2Over || 0;
-            pOdds.itb2Under = odds.itb2Under || 0;
-            if (odds.itb2Line) pOdds.itb2Line = odds.itb2Line;
-            if (odds.rawItb2LineIndex != null) pOdds.rawItb2LineIndex = odds.rawItb2LineIndex;
-          }
+          pOdds.itb2Over = odds.itb2Over || 0;
+          pOdds.itb2Under = odds.itb2Under || 0;
+          if (odds.itb2Line) pOdds.itb2Line = odds.itb2Line;
+          if (odds.rawItb2LineIndex != null) pOdds.rawItb2LineIndex = odds.rawItb2LineIndex;
         }
       } else {
         if (odds.totalLines && odds.totalLines.length > 0) pOdds.totalLines = odds.totalLines;
@@ -982,6 +1093,10 @@ export class StateManager extends EventEmitter {
         if (odds.itb2Line) pOdds.itb2Line = odds.itb2Line;
         if (odds.rawItb2LineIndex != null) pOdds.rawItb2LineIndex = odds.rawItb2LineIndex;
       }
+
+      // Enforce score-based minimum line constraints (never keep a line <= goals scored)
+      const activePeriodScore = isHt ? this.liveScoreHt : this.liveScoreFt;
+      this._reconcileOddsWithScore(eventId, targetPeriod, activePeriodScore);
 
       // Check if user has an explicit manual line override for active period/market
       const overKey = isHt ? 'HT_OVER' : 'OVER';
@@ -1029,6 +1144,11 @@ export class StateManager extends EventEmitter {
         const hasStrictAllowed = allowed && allowed.size > 0;
 
         const overSlip = this.armedBetslips.OVER;
+        if (overSlip && overSlip.betslipId && overSlip.betType && pOdds.rawTotalLineIndex != null && !overSlip.betType.endsWith(`,${pOdds.rawTotalLineIndex}`)) {
+          overSlip.bookiePrice = null;
+          overSlip.bookiePriceTs = 0;
+          this.armTarget(overKey, true).catch(() => {});
+        }
         const hasFreshOverBookie = overSlip.bookiePrice && (now - overSlip.bookiePriceTs < bookieQuoteTtl);
         if (!hasFreshOverBookie && (!updatedMarkets || updatedMarkets.ahou)) {
           if (hasStrictAllowed) {
@@ -1041,6 +1161,11 @@ export class StateManager extends EventEmitter {
 
         if (this.activeMarketMode === 'ITB') {
           const itb1Slip = this.armedBetslips.ITB1;
+          if (itb1Slip && itb1Slip.betslipId && itb1Slip.betType && pOdds.rawItb1LineIndex != null && !itb1Slip.betType.endsWith(`,${pOdds.rawItb1LineIndex}`)) {
+            itb1Slip.bookiePrice = null;
+            itb1Slip.bookiePriceTs = 0;
+            this.armTarget(itb1Key, true).catch(() => {});
+          }
           const hasFreshItb1 = itb1Slip.bookiePrice && (now - itb1Slip.bookiePriceTs < bookieQuoteTtl);
           if (!hasFreshItb1 && (!updatedMarkets || updatedMarkets.itb1)) {
             if (hasStrictAllowed) {
@@ -1052,6 +1177,11 @@ export class StateManager extends EventEmitter {
           }
 
           const itb2Slip = this.armedBetslips.ITB2;
+          if (itb2Slip && itb2Slip.betslipId && itb2Slip.betType && pOdds.rawItb2LineIndex != null && !itb2Slip.betType.endsWith(`,${pOdds.rawItb2LineIndex}`)) {
+            itb2Slip.bookiePrice = null;
+            itb2Slip.bookiePriceTs = 0;
+            this.armTarget(itb2Key, true).catch(() => {});
+          }
           const hasFreshItb2 = itb2Slip.bookiePrice && (now - itb2Slip.bookiePriceTs < bookieQuoteTtl);
           if (!hasFreshItb2 && (!updatedMarkets || updatedMarkets.itb2)) {
             if (hasStrictAllowed) {

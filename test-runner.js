@@ -1618,6 +1618,119 @@ engine.on('log', (log) => logCaptured.push(log));
   smHeal.destroy();
   console.log('✓ StateManager.purgeAllServerBetslips() & 403 Auto-Healing verified');
 
+  // 43. Test soccer goal (0:0 -> 0:1) immediately advances ITB2 (0.5 -> 1.5) and OVER (0.5 -> 1.5) while keeping ITB1 at 0.5
+  const goalFeed = new WsFeed(testConfig);
+  const smGoal = new StateManager(testConfig);
+  let goalSlipCounter = 0;
+  const mockGoalH2 = {
+    request: async (method, path, headers, body) => {
+      if (method === 'POST' && path === '/v1/betslips/') {
+        goalSlipCounter++;
+        return {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({
+            data: {
+              betslip_id: `goal_slip_${goalSlipCounter}`,
+              expiry_ts: Math.floor(Date.now() / 1000) + 60,
+              bookies_with_offers: [['pin88', 1.85, 500]]
+            }
+          }),
+          rttMs: 1.0
+        };
+      }
+      return { status: 200, headers: {}, body: '{}', rttMs: 0.8 };
+    },
+    isConnected: true,
+    ensureConnected: async () => {}
+  };
+  const goalAdapter = new MollybetAdapter(testConfig, mockGoalH2);
+  smGoal.setAdapter(goalAdapter);
+  smGoal.setWsFeed(goalFeed);
+
+  goalFeed.on('event_update', (ev) => smGoal.updateEventMetadata(ev));
+  goalFeed.on('odds_update', (od) => smGoal.updateOdds(od));
+
+  // Initial 0:0 state in soccer match
+  goalFeed.handleMessage(JSON.stringify([
+    'event',
+    ['fb', 'fb_goal_match_1'],
+    {
+      home: 'Arsenal',
+      away: 'Chelsea',
+      competition_id: 100,
+      competition_name: 'Premier League',
+      ir_status: { score: [0, 0], time: ['2h', 70] }
+    }
+  ]), false);
+
+  smGoal.setActiveEvent('fb_goal_match_1');
+  await smGoal.setMarketMode('ITB');
+
+  // Feed 0:0 offers where OVER, ITB1, and ITB2 are all 0.50 (index 2)
+  goalFeed.handleMessage(JSON.stringify([
+    'offers_hcap',
+    [100, 'fb', 'fb_goal_match_1'],
+    {
+      ahou: [[2, [['o', 1.55], ['u', 2.40]]]],
+      'tahou,h': [[2, [['o', 1.80], ['u', 2.00]]]],
+      'tahou,a': [[2, [['o', 1.90], ['u', 1.90]]]]
+    }
+  ]), false);
+
+  await new Promise(r => setTimeout(r, 150));
+
+  assert.equal(smGoal.liveOdds.ft.totalLine, '0.50');
+  assert.equal(smGoal.liveOdds.ft.itb1Line, '0.50');
+  assert.equal(smGoal.liveOdds.ft.itb2Line, '0.50');
+
+  // Now Away team (Chelsea) scores -> 0:1!
+  goalFeed.handleMessage(JSON.stringify([
+    'event',
+    ['fb', 'fb_goal_match_1'],
+    {
+      home: 'Arsenal',
+      away: 'Chelsea',
+      competition_id: 100,
+      competition_name: 'Premier League',
+      ir_status: { score: [0, 1], time: ['2h', 72] }
+    }
+  ]), false);
+
+  // Immediately on goal (even before new offers_hcap arrive):
+  // ITB2 must advance from 0.50 to 1.50 (index 6), OVER from 0.50 to 1.50 (index 6), while ITB1 stays 0.50 (index 2)!
+  assert.equal(smGoal.liveOdds.ft.itb2Line, '1.50', 'ITB2 line must immediately advance from 0.50 to 1.50 on 0:1 goal');
+  assert.equal(smGoal.liveOdds.ft.rawItb2LineIndex, 6, 'ITB2 rawLineIndex must become 6 (1.5) on 0:1 goal');
+  assert.equal(smGoal.liveOdds.ft.totalLine, '1.50', 'OVER line must immediately advance from 0.50 to 1.50 on 0:1 goal');
+  assert.equal(smGoal.liveOdds.ft.rawTotalLineIndex, 6, 'OVER rawLineIndex must become 6 (1.5) on 0:1 goal');
+  assert.equal(smGoal.liveOdds.ft.itb1Line, '0.50', 'ITB1 line must remain 0.50 since Home still has 0 goals');
+
+  await new Promise(r => setTimeout(r, 350));
+
+  assert.equal(smGoal.armedBetslips.OVER.betType, 'for,ir,0,1,ahover,6', 'Armed OVER slip must use new line index 6 at 0:1');
+  assert.equal(smGoal.armedBetslips.ITB1.betType, 'for,ir,0,1,tahover,h,2', 'Armed ITB1 slip must stay on line index 2 at 0:1');
+  assert.equal(smGoal.armedBetslips.ITB2.betType, 'for,ir,0,1,tahover,a,6', 'Armed ITB2 slip must use new line index 6 at 0:1');
+
+  // Now subsequent offers_hcap arrives for 0:1 with new 1.50 line for ITB2 and OVER
+  goalFeed.handleMessage(JSON.stringify([
+    'offers_hcap',
+    [100, 'fb', 'fb_goal_match_1'],
+    {
+      ahou: [[6, [['o', 1.72], ['u', 2.10]]]],
+      'tahou,h': [[2, [['o', 1.85], ['u', 1.95]]]],
+      'tahou,a': [[6, [['o', 2.15], ['u', 1.70]]]]
+    }
+  ]), false);
+
+  assert.equal(smGoal.liveOdds.ft.itb2Line, '1.50', 'ITB2 must remain 1.50 and never revert to zombie 0.50');
+  assert.equal(smGoal.liveOdds.ft.itb2Over, 2.15);
+  assert.equal(smGoal.liveOdds.ft.itb1Line, '0.50');
+  assert.equal(smGoal.liveOdds.ft.itb1Over, 1.85);
+
+  smGoal.destroy();
+  await goalFeed.destroy();
+  console.log('✓ Soccer post-goal line advancement (ITB2 & OVER 0.5 -> 1.5 on 0:1) & spectrum eviction verified');
+
   stickyWsFeed.destroy();
   smHt.destroy();
   testWsFeed.destroy();
